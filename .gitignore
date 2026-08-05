@@ -1,0 +1,49 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+*.pem
+*.key
+config.local.toml
+work-history.db
+*.db
+*.db-shm
+*.db-wal
+
+# Generated reports and temporary report context
+exports/
+.report-tmp/
+
+# One-off backfill and refresh prompts
+deploy/macos/*backfill*prompt.md
+deploy/macos/*refresh*prompt.md
+
+# Local project-mirror metadata
+sources/
+AGENTS.md
+.codex/
+.agents/
+
+# OS and IDE metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log

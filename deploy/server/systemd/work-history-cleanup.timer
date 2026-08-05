@@ -1,0 +1,10 @@
+[Unit]
+Description=Clean expired work-history data daily
+
+[Timer]
+OnCalendar=*-*-* 04:10:00 Asia/Seoul
+Persistent=true
+Unit=work-history-cleanup.service
+
+[Install]
+WantedBy=timers.target

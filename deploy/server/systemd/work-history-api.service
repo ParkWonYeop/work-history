@@ -1,0 +1,33 @@
+[Unit]
+Description=Work History read and ingestion API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+Environment=READ_API_TOKEN_FILE=%d/read-api-token
+LoadCredential=read-api-token:/etc/work-history/credentials/read-api-token
+ExecStart=/opt/work-history/venv/bin/work-history serve --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

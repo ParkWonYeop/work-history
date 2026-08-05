@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile work history daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Seoul
+RandomizedDelaySec=5min
+Persistent=true
+Unit=work-history-reconcile.service
+
+[Install]
+WantedBy=timers.target

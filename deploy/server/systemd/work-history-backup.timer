@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up work-history daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Seoul
+Persistent=true
+Unit=work-history-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Remove expired raw work-history records
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+ExecStart=/opt/work-history/venv/bin/work-history cleanup
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+UMask=0077

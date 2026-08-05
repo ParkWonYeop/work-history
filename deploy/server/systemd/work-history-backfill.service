@@ -1,0 +1,23 @@
+[Unit]
+Description=Resumable Jira and Confluence historical backfill
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+EnvironmentFile=/etc/work-history/backfill.env
+Environment=ATLASSIAN_API_TOKEN_FILE=%d/atlassian-api-token
+Environment=SYNC_LOCK_FILE=/run/work-history/sync.lock
+LoadCredential=atlassian-api-token:/etc/work-history/credentials/atlassian-api-token
+ExecStart=/opt/work-history/venv/bin/work-history backfill --source all --from ${BACKFILL_FROM} --to ${BACKFILL_TO} --chunk-days 7
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

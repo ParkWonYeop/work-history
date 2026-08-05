@@ -1,0 +1,12 @@
+[Unit]
+Description=Run work-history sync every ten minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=work-history-sync.service
+
+[Install]
+WantedBy=timers.target

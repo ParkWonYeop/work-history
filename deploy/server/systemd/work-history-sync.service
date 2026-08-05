@@ -1,0 +1,26 @@
+[Unit]
+Description=Incremental Jira and Confluence work-history sync
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+Environment=ATLASSIAN_API_TOKEN_FILE=%d/atlassian-api-token
+Environment=SYNC_LOCK_FILE=/run/work-history/sync.lock
+LoadCredential=atlassian-api-token:/etc/work-history/credentials/atlassian-api-token
+ExecStart=/opt/work-history/venv/bin/work-history sync --source all --mode incremental
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
