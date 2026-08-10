@@ -21,7 +21,9 @@ from work_history.models import (
     utcnow,
 )
 
-ReportCadence = Literal["daily", "monthly"]
+ReportCadence = Literal["daily", "weekly", "monthly", "overall"]
+ScheduledReportCadence = Literal["daily", "weekly", "monthly"]
+ParsedPeriod = date | tuple[date, date]
 ReportKind = Literal["work_report", "feedback"]
 
 REPORT_KINDS: tuple[ReportKind, ...] = ("work_report", "feedback")
@@ -46,9 +48,28 @@ _SECRET_KEY = re.compile(
 )
 
 
-def period_bounds(cadence: ReportCadence, period: date) -> tuple[date, date, str]:
+def period_bounds(cadence: ReportCadence, period: ParsedPeriod) -> tuple[date, date, str]:
     if cadence == "daily":
+        if not isinstance(period, date):
+            raise ValueError("daily period must be a date")
         return period, period + timedelta(days=1), period.isoformat()
+    if cadence == "weekly":
+        if not isinstance(period, date):
+            raise ValueError("weekly period must be a date")
+        start = period - timedelta(days=period.weekday())
+        iso_year, iso_week, _ = start.isocalendar()
+        return start, start + timedelta(days=7), f"{iso_year}-W{iso_week:02d}"
+    if cadence == "overall":
+        if not isinstance(period, tuple):
+            raise ValueError("overall period must be a date range")
+        start, inclusive_end = period
+        if inclusive_end < start:
+            raise ValueError("overall period end must be on or after start")
+        if (inclusive_end - start).days > 730:
+            raise ValueError("overall period may not exceed 730 days")
+        return start, inclusive_end + timedelta(days=1), f"{start}_to_{inclusive_end}"
+    if not isinstance(period, date):
+        raise ValueError("monthly period must be a date")
     start = period.replace(day=1)
     if start.month == 12:
         end = date(start.year + 1, 1, 1)
@@ -57,7 +78,7 @@ def period_bounds(cadence: ReportCadence, period: date) -> tuple[date, date, str
     return start, end, start.strftime("%Y-%m")
 
 
-def period_datetimes(cadence: ReportCadence, period: date) -> tuple[datetime, datetime]:
+def period_datetimes(cadence: ReportCadence, period: ParsedPeriod) -> tuple[datetime, datetime]:
     start, end, _ = period_bounds(cadence, period)
     return (
         datetime.combine(start, datetime.min.time(), SEOUL).astimezone(UTC),
@@ -65,20 +86,54 @@ def period_datetimes(cadence: ReportCadence, period: date) -> tuple[datetime, da
     )
 
 
-def parse_period(cadence: ReportCadence, value: str) -> date:
+def parse_period(cadence: ReportCadence, value: str) -> ParsedPeriod:
     try:
         if cadence == "daily":
             parsed = date.fromisoformat(value)
             if value != parsed.isoformat():
                 raise ValueError
             return parsed
+        if cadence == "weekly":
+            match = re.fullmatch(r"(\d{4})-W(\d{2})", value)
+            if not match:
+                raise ValueError
+            parsed = date.fromisocalendar(int(match.group(1)), int(match.group(2)), 1)
+            iso_year, iso_week, _ = parsed.isocalendar()
+            if value != f"{iso_year}-W{iso_week:02d}":
+                raise ValueError
+            return parsed
+        if cadence == "overall":
+            match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})", value)
+            if not match:
+                raise ValueError
+            start = date.fromisoformat(match.group(1))
+            end = date.fromisoformat(match.group(2))
+            if end < start or (end - start).days > 730:
+                raise ValueError
+            return start, end
         if not re.fullmatch(r"\d{4}-\d{2}", value):
             raise ValueError
         parsed = date.fromisoformat(f"{value}-01")
         return parsed
     except ValueError as exc:
-        expected = "YYYY-MM-DD" if cadence == "daily" else "YYYY-MM"
+        expected = {
+            "daily": "YYYY-MM-DD",
+            "weekly": "YYYY-Www",
+            "monthly": "YYYY-MM",
+            "overall": "YYYY-MM-DD_to_YYYY-MM-DD",
+        }[cadence]
         raise ValueError(f"period must use {expected}") from exc
+
+
+def stored_period_key(cadence: ReportCadence, start: date, exclusive_end: date) -> str:
+    if cadence == "daily":
+        return start.isoformat()
+    if cadence == "weekly":
+        iso_year, iso_week, _ = start.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+    if cadence == "monthly":
+        return start.strftime("%Y-%m")
+    return f"{start}_to_{exclusive_end - timedelta(days=1)}"
 
 
 def snapshot_hash(value: dict[str, Any]) -> str:
@@ -180,7 +235,7 @@ def source_snapshot(session: Session, period_end_time: datetime) -> dict[str, An
 def build_report_context(
     session: Session,
     cadence: ReportCadence,
-    period: date,
+    period: ParsedPeriod,
 ) -> dict[str, Any]:
     period_start, period_end, period_key = period_bounds(cadence, period)
     from_time, to_time = period_datetimes(cadence, period)
@@ -259,7 +314,7 @@ def build_report_context(
         )
 
     daily_documents = []
-    if cadence == "monthly":
+    if cadence in {"weekly", "monthly", "overall"}:
         daily_models = session.scalars(
             select(GeneratedReport)
             .where(
@@ -323,7 +378,7 @@ def build_report_context(
 
 def missing_report_periods(
     session: Session,
-    cadence: ReportCadence,
+    cadence: ScheduledReportCadence,
     from_date: date,
     to_date: date,
     include_partial: bool,
@@ -334,6 +389,13 @@ def missing_report_periods(
         while cursor <= to_date:
             periods.append((cursor, cursor.isoformat()))
             cursor += timedelta(days=1)
+    elif cadence == "weekly":
+        cursor = from_date - timedelta(days=from_date.weekday())
+        last = to_date - timedelta(days=to_date.weekday())
+        while cursor <= last:
+            iso_year, iso_week, _ = cursor.isocalendar()
+            periods.append((cursor, f"{iso_year}-W{iso_week:02d}"))
+            cursor += timedelta(days=7)
     else:
         cursor = from_date.replace(day=1)
         last = to_date.replace(day=1)
@@ -382,7 +444,7 @@ def missing_report_periods(
 def upsert_generated_report(
     session: Session,
     cadence: ReportCadence,
-    period: date,
+    period: ParsedPeriod,
     kind: ReportKind,
     payload: dict[str, Any],
 ) -> tuple[GeneratedReport, bool]:

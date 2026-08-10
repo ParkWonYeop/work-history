@@ -175,6 +175,84 @@ def test_report_upsert_is_idempotent_and_keeps_revisions(settings, session_facto
     assert stored.json()["markdown"].endswith("확정 데이터")
 
 
+def test_overall_report_context_and_storage(settings, session_factory) -> None:
+    private = _device(session_factory, "report-mac", "report_agent")
+    _seed_activity(session_factory)
+    client = TestClient(create_app(settings, session_factory))
+    period = "2026-04-01_to_2026-04-02"
+
+    context = _request(
+        client,
+        private,
+        "report-mac",
+        "POST",
+        "/v1/report-agent/context",
+        {"cadence": "overall", "period": period},
+    )
+    assert context.status_code == 200, context.text
+    assert context.json()["period"] == period
+    assert context.json()["period_start"] == "2026-04-01"
+    assert context.json()["period_end"] == "2026-04-03"
+    assert context.json()["activity_count"] == 1
+
+    path = f"/v1/reports/overall/{period}/work_report"
+    payload = {
+        "status": "final",
+        "title": "전체 업무 보고서",
+        "markdown": "# 전체 업무 보고서\n\n종합 내용",
+        "source_snapshot": context.json()["source_snapshot"],
+        "source_event_counts": context.json()["source_event_counts"],
+        "prompt_version": "work-history-report-v2",
+        "generator_model": "gpt-5.6-sol",
+    }
+    stored = _request(client, private, "report-mac", "PUT", path, payload)
+    assert stored.status_code == 200, stored.text
+    assert stored.json()["cadence"] == "overall"
+    assert stored.json()["period"] == period
+    assert stored.json()["period_end"] == "2026-04-03"
+
+    fetched = client.get(path, headers={"Authorization": "Bearer read-test-token"})
+    assert fetched.status_code == 200
+    assert fetched.json()["markdown"].endswith("종합 내용")
+
+
+def test_weekly_report_context_and_storage(settings, session_factory) -> None:
+    private = _device(session_factory, "report-mac", "report_agent")
+    _seed_activity(session_factory)
+    client = TestClient(create_app(settings, session_factory))
+    period = "2026-W14"
+
+    context = _request(
+        client,
+        private,
+        "report-mac",
+        "POST",
+        "/v1/report-agent/context",
+        {"cadence": "weekly", "period": period},
+    )
+    assert context.status_code == 200, context.text
+    assert context.json()["period"] == period
+    assert context.json()["period_start"] == "2026-03-30"
+    assert context.json()["period_end"] == "2026-04-06"
+    assert context.json()["activity_count"] == 1
+
+    path = f"/v1/reports/weekly/{period}/work_report"
+    payload = {
+        "status": "final",
+        "title": "2026년 14주차 업무 보고서",
+        "markdown": "# 주간 업무 보고서\n\n주간 종합 내용",
+        "source_snapshot": context.json()["source_snapshot"],
+        "source_event_counts": context.json()["source_event_counts"],
+        "prompt_version": "work-history-report-v2",
+        "generator_model": "gpt-5.6-sol",
+    }
+    stored = _request(client, private, "report-mac", "PUT", path, payload)
+    assert stored.status_code == 200, stored.text
+    assert stored.json()["cadence"] == "weekly"
+    assert stored.json()["period"] == period
+    assert stored.json()["period_end"] == "2026-04-06"
+
+
 def test_missing_reports_cover_empty_calendar_days_and_months(settings, session_factory) -> None:
     private = _device(session_factory, "report-mac", "report_agent")
     client = TestClient(create_app(settings, session_factory))
@@ -219,6 +297,26 @@ def test_missing_reports_cover_empty_calendar_days_and_months(settings, session_
         "2026-04",
         "2026-05",
         "2026-06",
+    ]
+
+    weekly = _request(
+        client,
+        private,
+        "report-mac",
+        "POST",
+        missing_path,
+        {
+            "cadence": "weekly",
+            "from": "2026-04-01",
+            "to": "2026-04-19",
+            "include_partial": True,
+        },
+    )
+    assert weekly.status_code == 200
+    assert [item["period"] for item in weekly.json()["items"]] == [
+        "2026-W14",
+        "2026-W15",
+        "2026-W16",
     ]
 
 

@@ -195,18 +195,19 @@ class CheckpointResponse(BaseModel):
     checkpoint: dict[str, Any] | None
 
 
-ReportCadence = Literal["daily", "monthly"]
+ReportCadence = Literal["daily", "weekly", "monthly", "overall"]
+ScheduledReportCadence = Literal["daily", "weekly", "monthly"]
 ReportKind = Literal["work_report", "feedback"]
 ReportStatus = Literal["partial", "final"]
 
 
 class ReportContextRequest(BaseModel):
     cadence: ReportCadence
-    period: str = Field(min_length=7, max_length=10)
+    period: str = Field(min_length=7, max_length=32)
 
 
 class ReportMissingRequest(BaseModel):
-    cadence: ReportCadence
+    cadence: ScheduledReportCadence
     from_date: date = Field(alias="from")
     to_date: date = Field(alias="to")
     include_partial: bool = True
@@ -280,7 +281,7 @@ class ReportMissingItem(BaseModel):
 
 
 class ReportMissingResponse(BaseModel):
-    cadence: ReportCadence
+    cadence: ScheduledReportCadence
     items: list[ReportMissingItem]
 
 

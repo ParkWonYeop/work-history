@@ -32,6 +32,7 @@ from work_history.reports import (
     missing_report_periods,
     parse_period,
     period_bounds,
+    stored_period_key,
     upsert_generated_report,
 )
 from work_history.schemas import (
@@ -461,7 +462,7 @@ def create_app(
         response_model=ReportItem,
     )
     async def put_report(
-        cadence: Literal["daily", "monthly"],
+        cadence: Literal["daily", "weekly", "monthly", "overall"],
         period: str,
         kind: Literal["work_report", "feedback"],
         request: Request,
@@ -493,7 +494,7 @@ def create_app(
         dependencies=[Depends(require_read_token)],
     )
     def list_reports(
-        cadence: Literal["daily", "monthly"] | None = Query(default=None),
+        cadence: Literal["daily", "weekly", "monthly", "overall"] | None = Query(default=None),
         kind: Literal["work_report", "feedback"] | None = Query(default=None),
         status_: Literal["partial", "final"] | None = Query(default=None, alias="status"),
         from_: date | None = Query(default=None, alias="from"),
@@ -523,11 +524,7 @@ def create_app(
                 ReportListItem(
                     id=row.id,
                     cadence=row.cadence,
-                    period=(
-                        row.period_start.isoformat()
-                        if row.cadence == "daily"
-                        else row.period_start.strftime("%Y-%m")
-                    ),
+                    period=stored_period_key(row.cadence, row.period_start, row.period_end),
                     kind=row.kind,
                     status=row.status,
                     title=row.title,
@@ -545,7 +542,7 @@ def create_app(
         dependencies=[Depends(require_read_token)],
     )
     def get_report(
-        cadence: Literal["daily", "monthly"],
+        cadence: Literal["daily", "weekly", "monthly", "overall"],
         period: str,
         kind: Literal["work_report", "feedback"],
         session: Session = Depends(db_session),
@@ -575,11 +572,7 @@ def _report_item(report: GeneratedReport) -> ReportItem:
     return ReportItem(
         id=report.id,
         cadence=report.cadence,
-        period=(
-            report.period_start.isoformat()
-            if report.cadence == "daily"
-            else report.period_start.strftime("%Y-%m")
-        ),
+        period=stored_period_key(report.cadence, report.period_start, report.period_end),
         period_start=report.period_start,
         period_end=report.period_end,
         kind=report.kind,

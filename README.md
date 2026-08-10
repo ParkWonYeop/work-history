@@ -59,6 +59,7 @@ deploy/npm/advanced.conf         NPM Advanced 설정
 deploy/proxmox/lxc-spec.md       권장 LXC 사양과 방화벽
 deploy/alembic/                  DB 마이그레이션
 tests/                           수집·API·보안·보고서 테스트
+WORK_HISTORY_API_USAGE.md        읽기 API 상세 사용법
 ```
 
 `exports/`, `.report-tmp/`, 로컬 DB, 가상환경, 캐시와 일회성 백필 프롬프트는 의도적으로 Git에서
@@ -404,12 +405,20 @@ Codex 앱에서 이 저장소를 작업 폴더로 선택하고 로컬 자동화�
 
 자동화는 전날의 누락 또는 source snapshot이 변경된 `partial` 보고서를 찾아 다음 두 문서를 생성한다.
 
-- `work_report`: 요약, 시간순 활동, 목표·행동·결과, 협업·결정, 장애, 다음 작업, 근거 링크
-- `feedback`: 근거 기반 평가, 강점, 병목, 개선점, 협업, 다음 근무일 행동, 판단 한계
+- `work_report`: 종합 정리, 업무 흐름 요약, 시간순 진행, 업무별 배경·목표·구체적 행동·판단·결과,
+  결정·협업·문서화, 장애와 미해결 사항, 우선순위별 다음 작업, 데이터 완전성과 근거 링크
+- `feedback`: 실행·우선순위·문제 해결·품질·주도성·협업·문서화를 아우르는 종합 평가, 유지할
+  업무 방식, 개선할 점과 원인, `현재 방식 → 권장 방식 → 실행 방법 → 기대 효과 → 확인 기준` 형태의
+  추천, 앞으로의 업무 진행 방향, 다음 근무일 행동 3개, 1~2주 개선 실험, 판단 한계
 
-매월 1일에는 전월의 일간 문서를 보조 근거로 월간 업무 보고서와 피드백도 생성한다. 활동이 없는 날은
-추론하지 않고 deterministic template으로 기록한다. Jira·Confluence·GitLab 중 하나라도 기간 끝까지
-수집되지 않았으면 문서는 `partial`, 모두 최신이면 `final`이다.
+근거가 충분한 일반적인 업무일에는 업무 보고서 약 1,500~3,500자, 피드백 약 1,200~3,000자를
+기준으로 하되, 분량을 맞추려고 사실을 반복하거나 추정 내용을 만들지 않는다. 정식 프롬프트 버전은
+`work-history-report-v2`다.
+
+매주 월요일에는 직전 월요일~일요일을 ISO 주차(`YYYY-Www`)로 묶어 주간 업무 보고서와 피드백을
+생성한다. 매월 1일에는 전월의 일간 문서를 보조 근거로 월간 업무 보고서와 피드백도 생성한다. 활동이
+없는 날은 추론하지 않고 deterministic template으로 기록한다. Jira·Confluence·GitLab 중 하나라도
+기간 끝까지 수집되지 않았으면 문서는 `partial`, 모두 최신이면 `final`이다.
 
 Report Agent 업데이트:
 
@@ -432,7 +441,7 @@ GET /v1/sync-status
 GET /v1/activities?from=RFC3339&to=RFC3339&sources=jira,gitlab&cursor=&limit=200
 GET /v1/artifacts/{source}/{remote_id}
 GET /v1/reports?cadence=daily&kind=work_report&status=final&from=YYYY-MM-DD&to=YYYY-MM-DD
-GET /v1/reports/{daily|monthly}/{period}/{work_report|feedback}
+GET /v1/reports/{daily|weekly|monthly|overall}/{period}/{work_report|feedback}
 ```
 
 활동 조회는 한 요청당 최대 31일, 페이지당 최대 500건이다. `next_cursor`가 null이 될 때까지 이어서
@@ -461,10 +470,21 @@ batch는 최대 500건 또는 압축 전 약 5 MiB로 분할된다. 동일 batch
 ```text
 POST /v1/report-agent/context
 POST /v1/report-agent/missing
-PUT  /v1/reports/{daily|monthly}/{period}/{work_report|feedback}
+PUT  /v1/reports/{daily|weekly|monthly|overall}/{period}/{work_report|feedback}
 ```
 
-일간 period는 `YYYY-MM-DD`, 월간 period는 `YYYY-MM` 형식이다.
+주간 period는 ISO 주차(`YYYY-Www`)이며 월요일부터 일요일까지다. 전체 재직 기간처럼 임의의 연속
+기간을 한 문서로 정리할 때는 보고서 에이전트 전용 `overall` cadence를 사용한다. 기간은
+`YYYY-MM-DD_to_YYYY-MM-DD` 형식이며 일간·주간·월간 문서와 같은 테이블 및 revision 정책으로
+저장된다.
+
+```text
+POST /v1/report-agent/context
+PUT  /v1/reports/overall/2026-04-01_to_2026-08-05/work_report
+GET  /v1/reports/overall/2026-04-01_to_2026-08-05/work_report
+```
+
+일간 period는 `YYYY-MM-DD`, 주간 period는 `YYYY-Www`, 월간 period는 `YYYY-MM` 형식이다.
 
 ## 13. 데이터 구조와 보존
 

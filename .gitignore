@@ -26,6 +26,7 @@ work-history.db
 
 # Generated reports and temporary report context
 exports/
+reports/
 .report-tmp/
 
 # One-off backfill and refresh prompts

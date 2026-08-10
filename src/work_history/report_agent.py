@@ -18,8 +18,8 @@ from work_history.security import b64url_decode, b64url_encode, sign_request
 
 KEYRING_SERVICE = "com.workhistory.report-agent"
 DEFAULT_CONFIG = Path.home() / "Library/Application Support/WorkHistoryReportAgent/config.toml"
-DEFAULT_PROMPT_VERSION = "work-history-report-v1"
-DEFAULT_MODEL = "gpt-5.6-terra"
+DEFAULT_PROMPT_VERSION = "work-history-report-v2"
+DEFAULT_MODEL = "gpt-5.6-sol"
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -231,19 +231,23 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--device-id", default="codex-report-agent")
 
     context = sub.add_parser("context")
-    context.add_argument("--cadence", choices=["daily", "monthly"], required=True)
+    context.add_argument(
+        "--cadence", choices=["daily", "weekly", "monthly", "overall"], required=True
+    )
     context.add_argument("--period", required=True)
     context.add_argument("--output", type=Path)
 
     missing = sub.add_parser("missing")
-    missing.add_argument("--cadence", choices=["daily", "monthly"], required=True)
+    missing.add_argument("--cadence", choices=["daily", "weekly", "monthly"], required=True)
     missing.add_argument("--from", dest="from_date", required=True)
     missing.add_argument("--to", dest="to_date", required=True)
     missing.add_argument("--exclude-partial", action="store_true")
     missing.add_argument("--output", type=Path)
 
     upload = sub.add_parser("upload")
-    upload.add_argument("--cadence", choices=["daily", "monthly"], required=True)
+    upload.add_argument(
+        "--cadence", choices=["daily", "weekly", "monthly", "overall"], required=True
+    )
     upload.add_argument("--period", required=True)
     upload.add_argument("--kind", choices=["work_report", "feedback"], required=True)
     upload.add_argument("--title", required=True)
