@@ -251,21 +251,39 @@ def create_app(
                 "counters": run.counters,
                 "error": run.error,
             }
-        gitlab_cursors = session.scalars(
-            select(SyncCursor)
-            .where(SyncCursor.source == "gitlab")
-            .order_by(SyncCursor.updated_at.desc())
-        ).all()
-        if gitlab_cursors:
-            newest = gitlab_cursors[0]
-            latest["gitlab"] = {
-                "status": "success",
-                "job_kind": "signed_ingest",
-                "started_at": None,
-                "finished_at": newest.updated_at,
-                "counters": {"devices": len(gitlab_cursors)},
-                "error": None,
-            }
+        for source, job_kind, counter_name in (
+            ("gitlab", "signed_ingest", "devices"),
+            ("slack", "socket_and_reconcile", "streams"),
+        ):
+            query = select(SyncCursor).where(SyncCursor.source == source)
+            if source == "slack":
+                query = query.where(SyncCursor.stream == "coverage")
+            cursors = session.scalars(query.order_by(SyncCursor.updated_at.desc())).all()
+            if not cursors:
+                continue
+            coverage: list[datetime] = []
+            for item in cursors:
+                value = (item.cursor or {}).get("until")
+                if not value:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if parsed.tzinfo:
+                    coverage.append(parsed.astimezone(UTC))
+            if source not in latest:
+                latest[source] = {
+                    "status": "success",
+                    "job_kind": job_kind,
+                    "started_at": None,
+                    "finished_at": cursors[0].updated_at,
+                    "counters": {counter_name: len(cursors)},
+                    "error": None,
+                }
+            latest[source]["coverage_through"] = (
+                max(coverage).isoformat() if coverage else None
+            )
         return {"sources": latest}
 
     @app.get(
@@ -296,7 +314,7 @@ def create_app(
         ]
         if sources:
             source_values = [part.strip() for part in sources.split(",") if part.strip()]
-            invalid = set(source_values) - {"jira", "confluence", "gitlab"}
+            invalid = set(source_values) - {"jira", "confluence", "gitlab", "slack"}
             if invalid:
                 raise HTTPException(status_code=400, detail="invalid source filter")
             conditions.append(ActivityEvent.source.in_(source_values))
@@ -334,7 +352,7 @@ def create_app(
         remote_id: str,
         session: Session = Depends(db_session),
     ) -> ArtifactItem:
-        if source not in {"jira", "confluence", "gitlab"}:
+        if source not in {"jira", "confluence", "gitlab", "slack"}:
             raise HTTPException(status_code=404, detail="artifact not found")
         model = session.scalar(
             select(Artifact)

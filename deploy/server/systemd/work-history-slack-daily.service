@@ -1,0 +1,26 @@
+[Unit]
+Description=Reconcile the previous Seoul-calendar day of Slack messages
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+Environment=SLACK_USER_TOKEN_FILE=%d/slack-user-token
+Environment=SYNC_LOCK_FILE=/run/work-history/slack-sync.lock
+LoadCredential=slack-user-token:/etc/work-history/credentials/slack-user-token
+ExecStart=/opt/work-history/venv/bin/work-history slack-daily
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

@@ -1,0 +1,34 @@
+[Unit]
+Description=Slack Socket Mode real-time work-history collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+Environment=SLACK_USER_TOKEN_FILE=%d/slack-user-token
+Environment=SLACK_APP_TOKEN_FILE=%d/slack-app-token
+LoadCredential=slack-user-token:/etc/work-history/credentials/slack-user-token
+LoadCredential=slack-app-token:/etc/work-history/credentials/slack-app-token
+ExecStart=/opt/work-history/venv/bin/work-history slack-socket
+Restart=on-failure
+RestartSec=30s
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

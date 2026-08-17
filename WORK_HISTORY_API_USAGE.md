@@ -1,6 +1,6 @@
 # Work History 읽기 API 사용법
 
-이 문서는 Work History 서버에 수집된 Jira·Confluence·GitLab 업무 활동, 업무 대상과 생성 보고서를
+이 문서는 Work History 서버에 수집된 Jira·Confluence·GitLab·Slack 업무 활동, 업무 대상과 생성 보고서를
 외부 프로그램에서 조회하는 방법을 설명한다. 수집 데이터 업로드 API와 Report Agent 서명 API는 장치
 키를 사용하는 내부 인터페이스이므로 여기서는 다루지 않는다.
 
@@ -122,7 +122,7 @@ GET /v1/activities
 |---|---:|---|
 | `from` | 예 | 조회 시작 시각. RFC 3339 timezone offset 필수, 시작 시각 포함 |
 | `to` | 예 | 조회 종료 시각. RFC 3339 timezone offset 필수, 종료 시각 제외 |
-| `sources` | 아니요 | `jira`, `confluence`, `gitlab`을 쉼표로 구분 |
+| `sources` | 아니요 | `jira`, `confluence`, `gitlab`, `slack`을 쉼표로 구분 |
 | `cursor` | 아니요 | 이전 응답의 `next_cursor`. 내용을 해석하거나 수정하지 않고 그대로 전달 |
 | `limit` | 아니요 | 페이지 크기. 기본 200, 최소 1, 최대 500 |
 
@@ -136,7 +136,7 @@ curl --fail-with-body --silent --show-error --get \
   -H "Authorization: Bearer ${WORK_HISTORY_API_TOKEN:?}" \
   --data-urlencode 'from=2026-08-07T00:00:00+09:00' \
   --data-urlencode 'to=2026-08-08T00:00:00+09:00' \
-  --data-urlencode 'sources=jira,confluence,gitlab' \
+  --data-urlencode 'sources=jira,confluence,gitlab,slack' \
   --data-urlencode 'limit=500' \
   "${WORK_HISTORY_API_URL:?}/v1/activities" | jq
 ```
@@ -189,7 +189,7 @@ curl --fail-with-body --silent --show-error --get \
 - `actor_is_self`: 본인 활동 여부
 - `artifact_remote_id`: 상세 대상 조회에 사용할 원천 ID
 - `changes`: 상태·담당자·필드 변경 등 구조화된 변경 내용
-- `url`: 원본 Jira·Confluence·GitLab 링크
+- `url`: 원본 Jira·Confluence·GitLab·Slack 링크
 
 ### 모든 페이지 조회
 
@@ -206,7 +206,7 @@ token = os.environ["WORK_HISTORY_API_TOKEN"]
 params = {
     "from": "2026-08-01T00:00:00+09:00",
     "to": "2026-08-08T00:00:00+09:00",
-    "sources": "jira,confluence,gitlab",
+    "sources": "jira,confluence,gitlab,slack",
     "limit": 500,
 }
 
@@ -232,7 +232,7 @@ print(f"loaded {len(activities)} activities")
 GET /v1/artifacts/{source}/{remote_id}
 ```
 
-활동의 `artifact_remote_id`를 이용해 이슈·Confluence 페이지·GitLab MR 또는 커밋의 현재 본문과 저장된
+활동의 `artifact_remote_id`를 이용해 이슈·Confluence 페이지·GitLab MR·커밋 또는 Slack 메시지의 현재 본문과 저장된
 버전을 조회한다.
 
 ```bash
@@ -241,7 +241,7 @@ curl --fail-with-body --silent --show-error \
   "${WORK_HISTORY_API_URL:?}/v1/artifacts/jira/WORK-123" | jq
 ```
 
-`source`는 `jira`, `confluence`, `gitlab` 중 하나다. `remote_id`에 `/`, 공백, `#` 같은 특수문자가
+`source`는 `jira`, `confluence`, `gitlab`, `slack` 중 하나다. `remote_id`에 `/`, 공백, `#` 같은 특수문자가
 있으면 URL path component로 인코딩해야 한다.
 
 응답 예시:
@@ -373,7 +373,7 @@ curl --fail-with-body --silent --show-error \
 - `status`: `final`이면 보고 기간 종료까지 모든 원천이 수집된 상태, `partial`이면 원천 일부가 덜
   수집된 상태
 - `markdown`: 현재 revision의 Markdown 본문
-- `source_snapshot`: 생성 당시 Jira·Confluence·GitLab 수집 범위
+- `source_snapshot`: 생성 당시 Jira·Confluence·GitLab·Slack 수집 범위
 - `source_event_counts`: 생성에 사용한 원천별 이벤트 수. 생산성 점수가 아닌 문맥 정보
 - `content_sha256`: 현재 Markdown 본문의 SHA-256
 - `current_revision`: 현재 revision 번호
@@ -392,7 +392,7 @@ curl --fail-with-body --silent --show-error --get \
   -H "Authorization: Bearer ${WORK_HISTORY_API_TOKEN:?}" \
   --data-urlencode "from=${FROM_KST}" \
   --data-urlencode "to=${TO_KST}" \
-  --data-urlencode 'sources=jira,confluence,gitlab' \
+  --data-urlencode 'sources=jira,confluence,gitlab,slack' \
   --data-urlencode 'limit=500' \
   "${WORK_HISTORY_API_URL:?}/v1/activities" > activities.json
 ```

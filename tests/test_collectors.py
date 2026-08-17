@@ -8,6 +8,7 @@ from work_history.collectors.common import ApiClient
 from work_history.collectors.confluence import ConfluenceCollector
 from work_history.collectors.gitlab import GitLabCollector
 from work_history.collectors.jira import JiraCollector
+from work_history.collectors.slack import SlackCollector, message_text
 
 NOW = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
 START = NOW - timedelta(hours=2)
@@ -202,6 +203,181 @@ def test_confluence_collector_normalizes_versions_and_comments() -> None:
     assert batch.artifacts[0].body_text == "Current design"
     assert any(version.body_text == "Version two" for version in batch.versions)
     assert any(event.action == "commented" for event in batch.events)
+
+
+def test_slack_collector_keeps_only_joined_conversations_and_all_authors() -> None:
+    root_ts = f"{NOW.timestamp():.6f}"
+    reply_ts = f"{(NOW + timedelta(minutes=1)).timestamp():.6f}"
+    dm_ts = f"{(NOW + timedelta(minutes=2)).timestamp():.6f}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = request.content.decode()
+        if path == "/auth.test":
+            return httpx.Response(200, json={"ok": True, "user_id": "U-ME", "team_id": "T1"})
+        if path == "/users.list":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "members": [
+                        {
+                            "id": "U-ME",
+                            "name": "me",
+                            "profile": {"display_name": "Me"},
+                        },
+                        {
+                            "id": "U-OTHER",
+                            "name": "other",
+                            "profile": {"display_name": "Other"},
+                        },
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if path == "/users.conversations":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "channels": [
+                        {"id": "C-JOINED", "name": "team", "is_member": True},
+                        {"id": "D1", "is_im": True, "user": "U-OTHER"},
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if path == "/conversations.history" and "channel=C-JOINED" in body:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        {"ts": root_ts, "user": "U-OTHER", "text": "Team update", "reply_count": 1}
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if path == "/conversations.replies":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        {"ts": root_ts, "user": "U-OTHER", "text": "Team update"},
+                        {
+                            "ts": reply_ts,
+                            "thread_ts": root_ts,
+                            "user": "U-ME",
+                            "text": "My reply",
+                        },
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if path == "/conversations.history" and "channel=D1" in body:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [{"ts": dm_ts, "user": "U-OTHER", "text": "Direct note"}],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_found"})
+
+    collector = SlackCollector("https://workspace.example", "xoxp-test")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        batch = collector.collect(START, END)
+    finally:
+        collector.close()
+
+    assert {artifact.body_text for artifact in batch.artifacts} == {
+        "Team update",
+        "My reply",
+        "Direct note",
+    }
+    assert {event.action for event in batch.events} == {"message_posted", "thread_replied"}
+    assert any(event.actor_is_self for event in batch.events)
+    assert any(not event.actor_is_self for event in batch.events)
+    assert {identity.remote_id for identity in batch.identities} == {"U-ME", "U-OTHER"}
+    assert not any("C-OTHER" in artifact.remote_id for artifact in batch.artifacts)
+
+
+def test_slack_socket_normalizes_edits_deletes_and_reactions() -> None:
+    timestamp = f"{NOW.timestamp():.6f}"
+    event_timestamp = f"{(NOW + timedelta(minutes=1)).timestamp():.6f}"
+    collector = SlackCollector("https://workspace.example", "xoxp-test")
+    collector.self_id = "U-ME"
+    collector.team_id = "T1"
+    collector.users = {
+        "U-ME": {"id": "U-ME", "name": "me", "profile": {"display_name": "Me"}}
+    }
+    collector.conversations = {"C1": {"id": "C1", "name": "team", "is_member": True}}
+    try:
+        edited, _ = collector.normalize_socket_event(
+            {
+                "event_id": "EV-EDIT",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel": "C1",
+                    "event_ts": event_timestamp,
+                    "previous_message": {"ts": timestamp, "user": "U-ME", "text": "Before"},
+                    "message": {
+                        "ts": timestamp,
+                        "user": "U-ME",
+                        "text": "After",
+                        "edited": {"ts": event_timestamp, "user": "U-ME"},
+                    },
+                },
+            }
+        )
+        deleted, _ = collector.normalize_socket_event(
+            {
+                "event_id": "EV-DELETE",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_deleted",
+                    "channel": "C1",
+                    "event_ts": event_timestamp,
+                    "deleted_ts": timestamp,
+                    "previous_message": {"ts": timestamp, "user": "U-ME", "text": "After"},
+                },
+            }
+        )
+        reacted, _ = collector.normalize_socket_event(
+            {
+                "event_id": "EV-REACTION",
+                "event": {
+                    "type": "reaction_added",
+                    "event_ts": event_timestamp,
+                    "user": "U-ME",
+                    "reaction": "white_check_mark",
+                    "item": {"type": "message", "channel": "C1", "ts": timestamp},
+                },
+            }
+        )
+    finally:
+        collector.close()
+
+    assert any(event.action == "message_edited" for event in edited.events)
+    assert edited.artifacts[-1].body_text == "After"
+    assert any(event.action == "message_deleted" for event in deleted.events)
+    assert deleted.artifacts[-1].state == "deleted"
+    assert any(event.action == "reaction_added" for event in reacted.events)
+
+
+def test_slack_message_text_includes_blocks_attachments_and_files() -> None:
+    assert message_text(
+        {
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "Block"}}],
+            "attachments": [{"text": "Attachment"}],
+            "files": [{"title": "design.png"}],
+        }
+    ) == "Block\nAttachment\n[파일] design.png"
 
 
 def test_gitlab_collector_supplements_events_with_mrs_and_commits() -> None:

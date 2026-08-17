@@ -27,7 +27,7 @@ ParsedPeriod = date | tuple[date, date]
 ReportKind = Literal["work_report", "feedback"]
 
 REPORT_KINDS: tuple[ReportKind, ...] = ("work_report", "feedback")
-SOURCES = ("jira", "confluence", "gitlab")
+SOURCES = ("jira", "confluence", "gitlab", "slack")
 SEOUL = ZoneInfo("Asia/Seoul")
 MAX_CONTEXT_CHARS = 1_000_000
 MAX_EVENTS = 5_000
@@ -42,7 +42,10 @@ _NAMED_SECRET = re.compile(
     r"(?i)(\b(?:api[_-]?token|access[_-]?token|client[_-]?secret|password|passwd|secret)"
     r"\b\s*[:=]\s*)([^\s,;\"']+)"
 )
-_KNOWN_TOKEN = re.compile(r"\b(?:glpat-[A-Za-z0-9_-]{12,}|ATATT[A-Za-z0-9_-]{12,})\b")
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:glpat-[A-Za-z0-9_-]{12,}|ATATT[A-Za-z0-9_-]{12,}|"
+    r"xox[a-z]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,})\b"
+)
 _SECRET_KEY = re.compile(
     r"(?i)^(?:api[_-]?token|access[_-]?token|client[_-]?secret|password|passwd|secret)$"
 )
@@ -207,11 +210,10 @@ def _parse_cursor_time(value: Any) -> datetime | None:
 def source_snapshot(session: Session, period_end_time: datetime) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for source in SOURCES:
-        cursors = session.scalars(
-            select(SyncCursor)
-            .where(SyncCursor.source == source)
-            .order_by(SyncCursor.updated_at.desc())
-        ).all()
+        query = select(SyncCursor).where(SyncCursor.source == source)
+        if source == "slack":
+            query = query.where(SyncCursor.stream == "coverage")
+        cursors = session.scalars(query.order_by(SyncCursor.updated_at.desc())).all()
         coverage_values = [
             parsed
             for item in cursors

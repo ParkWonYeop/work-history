@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry the previous-day Slack reconciliation from 09:05 through 17:05
+
+[Timer]
+OnCalendar=*-*-* 09..17:05:00 Asia/Seoul
+RandomizedDelaySec=2min
+Persistent=true
+Unit=work-history-slack-daily.service
+
+[Install]
+WantedBy=timers.target

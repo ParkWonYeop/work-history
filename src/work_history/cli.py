@@ -7,7 +7,7 @@ import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,7 +15,7 @@ import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from work_history.api import create_app
-from work_history.collectors import ConfluenceCollector, JiraCollector
+from work_history.collectors import ConfluenceCollector, JiraCollector, SlackCollector
 from work_history.config import Settings
 from work_history.db import create_database_engine, create_session_factory
 from work_history.models import Base, IngestDevice, utcnow
@@ -52,12 +52,49 @@ def _sync_lock() -> Iterator[None]:
 
 
 def _collector(source: str, settings: Settings):
+    if source == "slack":
+        settings.require_slack()
+        return SlackCollector(settings.slack_workspace_url, settings.slack_user_token)
     settings.require_atlassian()
     cls = JiraCollector if source == "jira" else ConfluenceCollector
     return cls(
         settings.atlassian_site_url,
         settings.atlassian_email,
         settings.atlassian_api_token,
+    )
+
+
+def _advance_slack_coverage(
+    session,
+    start: datetime,
+    end: datetime,
+    seed_from: datetime | None,
+) -> None:
+    current = get_cursor(session, "slack", "coverage")
+    if current is None:
+        if seed_from is None:
+            return
+        set_cursor(
+            session,
+            "slack",
+            "coverage",
+            {"since": seed_from.isoformat(), "until": end.isoformat()},
+        )
+        return
+    current_until = _parse_time(str(current.get("until")), "UTC")
+    current_since = _parse_time(str(current.get("since")), "UTC")
+    same_backfill = seed_from is not None and current_since == seed_from
+    if current_until < start and not same_backfill:
+        return
+    set_cursor(
+        session,
+        "slack",
+        "coverage",
+        {
+            "since": current_since.isoformat(),
+            "until": max(current_until, end).isoformat(),
+            "last_success": utcnow().isoformat(),
+        },
     )
 
 
@@ -69,6 +106,8 @@ def _sync_one(
     settings: Settings,
     session_factory,
     cursor_stream: str = "default",
+    advance_slack_coverage: bool = False,
+    slack_coverage_seed: datetime | None = None,
 ) -> dict[str, int]:
     with session_factory() as session:
         run = start_sync_run(session, source, job_kind)
@@ -89,6 +128,8 @@ def _sync_one(
                 cursor_stream,
                 {"until": end.isoformat(), "last_success": utcnow().isoformat()},
             )
+            if source == "slack" and advance_slack_coverage:
+                _advance_slack_coverage(session, start, end, slack_coverage_seed)
             run = session.get(type(run), run_id)
             finish_sync_run(run, "success", {**counts, "records": batch.record_count})
             session.commit()
@@ -165,6 +206,8 @@ def command_backfill(args: argparse.Namespace, settings: Settings, session_facto
                     settings,
                     session_factory,
                     cursor_stream=stream,
+                    advance_slack_coverage=source == "slack",
+                    slack_coverage_seed=requested_start if source == "slack" else None,
                 )
                 print(
                     json.dumps(
@@ -177,6 +220,45 @@ def command_backfill(args: argparse.Namespace, settings: Settings, session_facto
                     )
                 )
                 start = end
+    return 0
+
+
+def command_slack_daily(args: argparse.Namespace, settings: Settings, session_factory) -> int:
+    timezone = ZoneInfo(settings.default_timezone)
+    target = (
+        date.fromisoformat(args.date)
+        if args.date
+        else datetime.now(timezone).date() - timedelta(days=1)
+    )
+    start = datetime.combine(target, time.min, timezone).astimezone(UTC)
+    end = datetime.combine(target + timedelta(days=1), time.min, timezone).astimezone(UTC)
+    stream = f"daily:{target.isoformat()}"
+    with _sync_lock():
+        with session_factory() as session:
+            cursor = get_cursor(session, "slack", stream)
+        if cursor and cursor.get("last_success") and not args.force:
+            print(json.dumps({"source": "slack", "date": target.isoformat(), "status": "skipped"}))
+            return 0
+        counts = _sync_one(
+            "slack",
+            start,
+            end,
+            "daily_reconcile",
+            settings,
+            session_factory,
+            cursor_stream=stream,
+            advance_slack_coverage=True,
+        )
+    print(
+        json.dumps(
+            {
+                "source": "slack",
+                "date": target.isoformat(),
+                "status": "success",
+                **counts,
+            }
+        )
+    )
     return 0
 
 
@@ -202,16 +284,28 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = sub.add_parser("revoke-device")
     revoke.add_argument("--device-id", required=True)
     sync = sub.add_parser("sync")
-    sync.add_argument("--source", choices=["jira", "confluence", "all"], default="all")
+    sync.add_argument(
+        "--source",
+        choices=["jira", "confluence", "slack", "all"],
+        default="all",
+    )
     sync.add_argument("--mode", choices=["incremental", "reconcile"], default="incremental")
     sync.add_argument("--lookback-days", type=int, default=14)
     sync.add_argument("--from", dest="from_time")
     sync.add_argument("--to", dest="to_time")
     backfill = sub.add_parser("backfill")
-    backfill.add_argument("--source", choices=["jira", "confluence", "all"], default="all")
+    backfill.add_argument(
+        "--source",
+        choices=["jira", "confluence", "slack", "all"],
+        default="all",
+    )
     backfill.add_argument("--from", dest="from_time", required=True)
     backfill.add_argument("--to", dest="to_time", required=True)
     backfill.add_argument("--chunk-days", type=int, default=7)
+    slack_daily = sub.add_parser("slack-daily")
+    slack_daily.add_argument("--date", help="Asia/Seoul date in YYYY-MM-DD; default is yesterday")
+    slack_daily.add_argument("--force", action="store_true")
+    sub.add_parser("slack-socket")
     sub.add_parser("cleanup")
     return parser
 
@@ -270,6 +364,13 @@ def main() -> None:
         raise SystemExit(command_sync(args, settings, session_factory))
     if args.command == "backfill":
         raise SystemExit(command_backfill(args, settings, session_factory))
+    if args.command == "slack-daily":
+        raise SystemExit(command_slack_daily(args, settings, session_factory))
+    if args.command == "slack-socket":
+        from work_history.slack_socket import run_slack_socket
+
+        run_slack_socket(settings, session_factory)
+        return
     if args.command == "cleanup":
         with session_factory() as session:
             result = cleanup_expired(session)

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from work_history.api import create_app
 from work_history.models import ActivityEvent, Artifact, IngestDevice, SyncCursor
+from work_history.reports import source_snapshot
 from work_history.security import b64url_encode, sign_request
 
 
@@ -101,15 +102,35 @@ def _seed_activity(session_factory) -> None:
                 url=artifact.url,
             )
         )
-        for source in ("jira", "confluence", "gitlab"):
+        for source in ("jira", "confluence", "gitlab", "slack"):
             session.add(
                 SyncCursor(
                     source=source,
-                    stream="default" if source != "gitlab" else "work-mac",
+                    stream=(
+                        "work-mac"
+                        if source == "gitlab"
+                        else ("coverage" if source == "slack" else "default")
+                    ),
                     cursor={"until": "2026-04-03T00:00:00+00:00"},
                 )
             )
         session.commit()
+
+
+def test_slack_socket_cursor_does_not_claim_contiguous_report_coverage(
+    session_factory,
+) -> None:
+    period_end = datetime(2026, 4, 2, tzinfo=UTC)
+    with session_factory() as session:
+        session.add(
+            SyncCursor(
+                source="slack",
+                stream="socket",
+                cursor={"until": period_end.isoformat()},
+            )
+        )
+        session.commit()
+        assert source_snapshot(session, period_end)["slack"]["status"] == "missing"
 
 
 def test_report_context_redacts_content_and_enforces_device_purpose(

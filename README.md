@@ -1,13 +1,13 @@
 # Work History
 
-Jira Cloud, Confluence Cloud, 사내 GitLab에 남은 **내 업무 활동만** 수집해 PostgreSQL에
-정규화하고, Codex가 일간·월간 업무 보고서와 피드백을 생성할 수 있게 하는 개인용 시스템이다.
+Jira Cloud, Confluence Cloud, 사내 GitLab의 **내 업무 활동**과 내가 참여한 Slack 대화를 PostgreSQL에
+정규화하고, Codex가 일간·주간·월간 업무 보고서와 피드백을 생성할 수 있게 하는 개인용 시스템이다.
 
 Jira와 Confluence는 Proxmox의 Debian LXC가 직접 수집한다. 사내 VPN에서만 접근되는 GitLab은
 업무용 Mac의 기존 VPN 연결을 사용한다. 이 프로젝트는 FortiClient를 실행하거나 로그인·MFA·이메일
 OTP를 자동화하지 않는다.
 
-> 이 저장소가 비공개여도 회사의 Jira·Confluence·GitLab 데이터를 개인 장비로 수집·보관하는 행위는
+> 이 저장소가 비공개여도 회사의 Jira·Confluence·GitLab·Slack 데이터를 개인 장비로 수집·보관하는 행위는
 > 별도 문제다. 설치 전에 회사 보안·개인정보·소스코드 반출 정책과 관리자의 승인을 확인해야 한다.
 
 ## 1. 시스템 개요
@@ -15,6 +15,7 @@ OTP를 자동화하지 않는다.
 ```mermaid
 flowchart LR
     A["Atlassian Cloud<br/>Jira · Confluence"] -->|"HTTPS · 10분 주기"| L["Debian 13 LXC"]
+    S["Slack<br/>참여 중인 대화"] -->|"Socket Mode + 전날 재검증"| L
     G["사내 GitLab"] -->|"사용자가 연결한 FortiClient VPN"| M["업무용 Mac GitLab Agent"]
     M -->|"Ed25519 서명 HTTPS"| N["Nginx Proxy Manager"]
     N -->|"HTTP :8080<br/>NPM 주소만 허용"| L
@@ -27,9 +28,10 @@ flowchart LR
 
 | 구성요소 | 위치 | 역할 |
 |---|---|---|
-| API·DB·Atlassian 수집기 | Debian 13 LXC | 정규화, 저장, 읽기 API, GitLab 수신 API, 보고서 저장 |
+| API·DB·Cloud 수집기 | Debian 13 LXC | Jira·Confluence·Slack 정규화, 저장, 읽기 API, GitLab 수신 API, 보고서 저장 |
 | PostgreSQL | 같은 LXC | 업무 활동·문맥·체크포인트·보고서와 변경 이력 보관 |
 | GitLab Agent | 업무용 macOS | VPN 연결 시 본인 GitLab 활동 수집 및 서명 전송 |
+| Slack 수집기 | Debian 13 LXC | 참여 중인 대화의 실시간 이벤트 수신, 전날 메시지 재검증 |
 | Report Agent | Codex를 실행하는 macOS | 보고서 문맥 조회와 Markdown 업로드 |
 | Nginx Proxy Manager | 별도 게스트 권장 | 공인 HTTPS 종료 후 LXC 8080으로 전달 |
 | Proxmox | 내부 서버 | 비권한 LXC, 방화벽, 게스트 백업 제공 |
@@ -39,6 +41,8 @@ flowchart LR
 - Jira: 본인이 생성·담당·변경·댓글·worklog에 참여한 이슈와 changelog
 - Confluence: 본인이 생성·기여한 페이지 후보, 본문·버전·댓글
 - GitLab: 본인 이벤트, 작성·담당·리뷰 MR/이슈, notes, discussions, approvals, commits
+- Slack: 본인이 참여 중인 public/private 채널, 그룹 DM, 본인과 상대방의 1:1 DM 메시지·스레드·반응
+- Slack 제외: 가입하지 않은 공개 채널, 접근 권한이 없는 비공개 채널, 다른 사람끼리만 참여한 DM
 - 첨부파일: 바이너리는 저장하지 않고 메타데이터와 원본 링크만 저장
 - 수집 불가: Confluence 페이지 열람처럼 API에 활동으로 노출되지 않는 행동
 - 권한 상실·삭제된 원본: 원본 시스템에서 더 이상 조회할 수 없으면 재수집할 수 없음
@@ -48,7 +52,7 @@ flowchart LR
 ```text
 src/work_history/                 애플리케이션 소스
   api.py                          FastAPI 읽기·수신·보고서 API
-  collectors/                    Jira·Confluence·GitLab REST 수집기
+  collectors/                    Jira·Confluence·GitLab·Slack REST 수집기
   gitlab_agent.py                macOS GitLab 수집·재개 에이전트
   report_agent.py                Codex용 서명 보고서 클라이언트
   models.py                      SQLAlchemy 데이터 모델
@@ -112,6 +116,7 @@ DB 저장과 GitLab 체크포인트 변경은 같은 트랜잭션에서 처리�
 
 - Jira·Confluence에 접근 가능한 본인 Atlassian 계정과 API 토큰
 - GitLab PAT: 필요한 프로젝트를 읽을 수 있는 최소 권한의 `read_api` 사용 권장
+- 설치 완료된 Slack 앱의 `xoxp-` 사용자 토큰과 `connections:write` 전용 `xapp-` 앱 토큰
 - 보고서를 읽을 클라이언트용 Bearer 토큰은 설치 중 서버가 생성
 
 ### Mac
@@ -236,6 +241,9 @@ nano /etc/work-history/server.env
 DATABASE_URL=postgresql+psycopg:///workhistory?host=/var/run/postgresql
 ATLASSIAN_SITE_URL=https://example.atlassian.net
 ATLASSIAN_EMAIL=person@example.com
+SLACK_WORKSPACE_URL=https://example-workspace.slack.com
+SLACK_APP_ID=A0123456789
+SLACK_HISTORY_START=2026-04-01
 PUBLIC_BASE_URL=https://work-history.example.com
 DEFAULT_TIMEZONE=Asia/Seoul
 RAW_RETENTION_DAYS=30
@@ -310,6 +318,69 @@ DB를 갱신하지 않는다.
 - 최근 재검증: 매일 03:30 KST, 최근 14일
 - raw 원본 정리: 매일 04:10 KST
 - DB 백업: 매일 02:30 KST
+
+## 9A. Slack 앱과 초기 수집
+
+Slack 앱에는 bot/write 권한 없이 다음 **User Token Scopes**만 부여한다.
+
+```text
+channels:read, groups:read, im:read, mpim:read
+channels:history, groups:history, im:history, mpim:history
+reactions:read, users:read
+```
+
+Socket Mode를 켜고 `connections:write` 범위의 app-level token을 만든다. User Events에는
+`message.channels`, `message.groups`, `message.im`, `message.mpim`, `reaction_added`,
+`reaction_removed`를 등록하고 앱을 workspace에 다시 설치한다. Request URL, bot token,
+`chat:write`는 필요 없다.
+
+새 환경에서는 `deploy/slack/app-manifest.yml`을 Slack 앱 설정의 **App Manifest**에 적용하면 같은
+읽기 범위와 User Events를 재현할 수 있다. manifest에는 토큰이나 workspace 식별자가 없다.
+
+서버에서 다음 스크립트를 실행하고 화면에 표시되지 않는 입력란에 `xoxp-`와 `xapp-` 토큰을 넣는다.
+토큰을 명령행 인자, `server.env`, 셸 기록, 채팅 또는 Git에 남기지 않는다.
+
+```sh
+/opt/work-history/source/deploy/server/configure-slack.sh
+```
+
+입력 예시는 다음과 같다.
+
+```text
+Workspace URL: https://example-workspace.slack.com
+App ID: A0123456789
+Initial history date: 2026-04-01
+```
+
+설정 스크립트는 다음을 수행한다.
+
+- 토큰을 root 전용 credential 파일로 저장하고 systemd가 실행 시에만 전달
+- Socket Mode 실시간 수집기 활성화
+- 전날 서울 날짜 메시지를 09:05~17:05 매시간 재검증하는 timer 활성화
+- 첫 성공 뒤 같은 날짜 재검증은 DB cursor를 보고 즉시 건너뜀
+- `2026-04-01`부터 설정 시각까지 7일 단위 백필을 백그라운드로 시작
+
+상태와 백필 진행을 확인한다.
+
+```sh
+systemctl status work-history-slack-socket.service --no-pager
+systemctl list-timers work-history-slack-daily.timer
+journalctl -u work-history-slack-socket.service -n 100 --no-pager
+journalctl -u work-history-slack-backfill.service -f
+```
+
+수집기는 user token으로 `users.conversations`를 호출해 현재 계정이 참가자인 대화만 허용한다.
+public/private 채널, IM, MPIM 모두 Slack이 반환한 현재 membership을 기준으로 한다. 허용된 대화에서는 모든 작성자의
+본문을 저장하고 `actor_is_self`로 본인 여부를 구분한다. 보고서 자동화는 다른 사람의 메시지를 요청,
+결정, 리뷰, 장애물의 문맥으로만 사용하며 본인의 작업량으로 계산하지 않는다.
+
+보고서의 Slack freshness는 Socket 이벤트나 하루짜리 조회의 최신 시각이 아니라 `2026-04-01`부터
+빈틈없이 전진한 `coverage` cursor로 판정한다. 따라서 초기 백필이 아직 도달하지 않은 과거 보고서가
+Slack 자료 없이 `final`로 잘못 확정되지 않는다.
+
+설치 전 이미 삭제된 메시지와 Slack 보존 정책으로 사라진 기록은 백필할 수 없다. Socket Mode가
+중지된 동안 오래된 스레드 원문에 달린 새 답글이나 과거 메시지 편집·삭제는 전날 history API만으로
+완전히 복원되지 않을 수 있으므로 실시간 서비스를 항상 켜고 매일 재검증 결과를 확인한다.
 
 ## 10. macOS GitLab Agent 설치
 
@@ -417,7 +488,7 @@ Codex 앱에서 이 저장소를 작업 폴더로 선택하고 로컬 자동화�
 
 매주 월요일에는 직전 월요일~일요일을 ISO 주차(`YYYY-Www`)로 묶어 주간 업무 보고서와 피드백을
 생성한다. 매월 1일에는 전월의 일간 문서를 보조 근거로 월간 업무 보고서와 피드백도 생성한다. 활동이
-없는 날은 추론하지 않고 deterministic template으로 기록한다. Jira·Confluence·GitLab 중 하나라도
+없는 날은 추론하지 않고 deterministic template으로 기록한다. Jira·Confluence·GitLab·Slack 중 하나라도
 기간 끝까지 수집되지 않았으면 문서는 `partial`, 모두 최신이면 `final`이다.
 
 Report Agent 업데이트:
@@ -438,7 +509,7 @@ GET /healthz
 
 ```text
 GET /v1/sync-status
-GET /v1/activities?from=RFC3339&to=RFC3339&sources=jira,gitlab&cursor=&limit=200
+GET /v1/activities?from=RFC3339&to=RFC3339&sources=jira,gitlab,slack&cursor=&limit=200
 GET /v1/artifacts/{source}/{remote_id}
 GET /v1/reports?cadence=daily&kind=work_report&status=final&from=YYYY-MM-DD&to=YYYY-MM-DD
 GET /v1/reports/{daily|weekly|monthly|overall}/{period}/{work_report|feedback}
@@ -490,7 +561,7 @@ GET  /v1/reports/overall/2026-04-01_to_2026-08-05/work_report
 
 주요 테이블:
 
-- `source_identities`: 소스별 본인 계정 식별자
+- `source_identities`: 소스별 계정 식별자와 본인 여부
 - `artifacts`, `artifact_versions`: 이슈·페이지·MR 등 업무 대상과 버전
 - `activity_events`: 정규화한 활동 이벤트
 - `raw_records`: 수집 당시 원본 API JSON
@@ -581,9 +652,18 @@ route -n get gitlab.internal.example
 - 장치 ID가 config와 서버 등록값에서 같은지 확인한다.
 - 개인키를 복사해 여러 장치에서 공유하지 않는다.
 
+### Slack 실시간 또는 백필이 실패함
+
+- `xoxp-` user token과 `xapp-` app-level token을 서로 바꾸어 넣지 않았는지 확인한다.
+- 앱의 User Token Scopes와 User Events가 위 목록과 같고 변경 후 재설치했는지 확인한다.
+- Socket Mode가 활성화됐고 app-level token에 `connections:write`가 있는지 확인한다.
+- `journalctl -u work-history-slack-socket.service`에서 `missing_scope`, `invalid_auth`,
+  `not_allowed_token_type` 오류를 확인한다.
+- 채널을 새로 가입하거나 나간 결과는 실시간 수집기가 15분 안에 membership을 갱신한다.
+
 ### 보고서가 `partial`로 남음
 
-- 보고 기간 끝까지 세 source가 모두 수집됐는지 `/v1/sync-status`로 확인한다.
+- 보고 기간 끝까지 네 source가 모두 수집됐는지 `/v1/sync-status`로 확인한다.
 - Mac에서 GitLab catch-up을 실행한다.
 - 다음 11시 자동화를 기다리거나 누락 조회 후 다시 생성한다.
 - source snapshot이 바뀐 partial만 재생성되므로 이미 final인 문서는 불필요하게 덮어쓰지 않는다.
@@ -625,7 +705,7 @@ export READ_API_TOKEN='development-only-token'
 
 ## 18. 운영 전 최종 점검
 
-- [ ] 회사 정책상 Jira·Confluence·GitLab 데이터의 개인 Proxmox 보관이 허용됨
+- [ ] 회사 정책상 Jira·Confluence·GitLab·Slack 데이터의 개인 Proxmox 보관이 허용됨
 - [ ] LXC는 비권한이고 불필요한 기능이 꺼져 있음
 - [ ] PostgreSQL 5432가 LAN과 인터넷에서 닫혀 있음
 - [ ] LXC 8080은 NPM IP에서만 접근 가능
@@ -633,8 +713,9 @@ export READ_API_TOKEN='development-only-token'
 - [ ] SSH 비밀번호 로그인이 비활성화됨
 - [ ] NPM HTTPS와 인증서 갱신이 정상임
 - [ ] GitLab PAT가 최소 권한이고 Keychain에만 존재함
+- [ ] Slack 앱이 읽기 전용 최소 권한이며 xoxp/xapp 토큰이 root credential에만 존재함
 - [ ] 장치별 키와 읽기 Bearer 토큰이 분리됨
-- [ ] Jira·Confluence·GitLab 하루 표본을 원본 화면과 DB에서 대조함
+- [ ] Jira·Confluence·GitLab·Slack 하루 표본을 원본 화면과 DB에서 대조함
 - [ ] VPN 중단·Mac 재시작·LXC 재시작 후 checkpoint 재개를 검증함
 - [ ] 중복 batch·잘못된 서명·nonce 재사용·만료 timestamp가 거부됨
 - [ ] 매일 backup이 생성되고 별도 DB 복원 시험을 통과함

@@ -1,0 +1,29 @@
+[Unit]
+Description=Resumable Slack historical backfill
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+EnvironmentFile=/etc/work-history/slack-backfill.env
+Environment=SLACK_USER_TOKEN_FILE=%d/slack-user-token
+Environment=SYNC_LOCK_FILE=/run/work-history/slack-sync.lock
+LoadCredential=slack-user-token:/etc/work-history/credentials/slack-user-token
+ExecStart=/opt/work-history/venv/bin/work-history backfill --source slack --from ${SLACK_BACKFILL_FROM} --to ${SLACK_BACKFILL_TO} --chunk-days 7
+Restart=on-failure
+RestartSec=10min
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

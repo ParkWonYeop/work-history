@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+SourceName = Literal["jira", "confluence", "gitlab", "slack"]
+
 
 def _aware(value: datetime | None) -> datetime | None:
     if value is None:
@@ -15,7 +17,7 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 class IdentityRecord(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     remote_id: str = Field(min_length=1, max_length=512)
     username: str | None = None
     display_name: str | None = None
@@ -25,7 +27,7 @@ class IdentityRecord(BaseModel):
 
 
 class ArtifactRecord(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     remote_id: str = Field(min_length=1, max_length=512)
     kind: str = Field(min_length=1, max_length=64)
     title: str = ""
@@ -42,7 +44,7 @@ class ArtifactRecord(BaseModel):
 
 
 class ArtifactVersionRecord(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     artifact_remote_id: str = Field(min_length=1, max_length=512)
     remote_version_id: str = Field(min_length=1, max_length=512)
     author_remote_id: str | None = None
@@ -54,7 +56,7 @@ class ArtifactVersionRecord(BaseModel):
 
 
 class ActivityRecord(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     event_key: str = Field(min_length=1, max_length=768)
     kind: str = Field(min_length=1, max_length=64)
     action: str = Field(min_length=1, max_length=128)
@@ -71,7 +73,7 @@ class ActivityRecord(BaseModel):
 
 
 class RawRecordInput(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     record_key: str = Field(min_length=1, max_length=768)
     kind: str = Field(min_length=1, max_length=64)
     payload: dict[str, Any]
@@ -81,7 +83,7 @@ class RawRecordInput(BaseModel):
 
 
 class ArtifactUnavailableRecord(BaseModel):
-    source: Literal["jira", "confluence", "gitlab"]
+    source: SourceName
     remote_id: str = Field(min_length=1, max_length=512)
     observed_at: datetime
 

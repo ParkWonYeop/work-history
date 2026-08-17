@@ -38,7 +38,7 @@ All dates use `Asia/Seoul`. On every run:
    - `다음 작업 및 우선순위`: list concrete follow-up work in priority order and explain the reason
      and completion condition for each item.
    - `데이터 완전성 및 근거`: state source freshness, gaps, redactions or truncation, and provide
-     Jira, Confluence, or GitLab links near the claims they support.
+     Jira, Confluence, GitLab, or Slack links near the claims they support.
 
    The `feedback` must contain these sections:
 
@@ -53,7 +53,7 @@ All dates use `Asia/Seoul`. On every run:
      observed symptom, likely cause, impact, and confidence/limitation; avoid generic advice.
    - `추천 개선 방법`: for every material improvement, use the structure `현재 방식 → 권장 방식 →
      실행 방법 → 기대 효과 → 확인 기준`. Recommendations must be realistic for the user's Jira,
-     Confluence, GitLab, review, and development workflow.
+     Confluence, GitLab, Slack, review, and development workflow.
    - `앞으로의 업무 진행 방향`: recommend how to plan, sequence, document, validate, and close work
      going forward. Include short-term priority, a repeatable daily work loop, communication and
      documentation checkpoints, and rules for handling blockers or scope changes.
@@ -69,9 +69,12 @@ All dates use `Asia/Seoul`. On every run:
    work genuinely requires it; use shorter documents when evidence is sparse rather than inventing
    detail.
 5. Treat counts as context, never as a productivity score. Separate observations from
-   inferences, do not invent impact, intent, completion, or causality, and cite Jira, Confluence, or
-   GitLab URLs near factual work claims. Synthesize related events, but preserve important technical
-   details, decisions, and unresolved uncertainty.
+   inferences, do not invent impact, intent, completion, or causality, and cite Jira, Confluence,
+   GitLab, or Slack URLs near factual work claims. Slack events with `actor_is_self=false` are
+   collaboration context, not the user's own output. Use them only to explain requests, decisions,
+   reviews, blockers, or outcomes connected to the user's work; never count general channel traffic
+   as the user's productivity. Synthesize related events, but preserve important technical details,
+   decisions, and unresolved uncertainty.
 6. Upload with prompt version `work-history-report-v2` and model `gpt-5.6-sol`. The client
    decides `partial` versus `final` from source freshness.
 7. On the first calendar day of a month, after the previous day is stored, process the previous
@@ -97,8 +100,8 @@ All dates use `Asia/Seoul`. On every run:
    carry-over work. The weekly feedback must include a detailed `종합 평가`, strengths to preserve,
    patterns to correct, concrete recommendations using `현재 방식 → 권장 방식 → 실행 방법 → 기대
    효과 → 확인 기준`, and an actionable next-week plan. Use stored daily documents as supporting
-   evidence and reconcile them with the Jira, Confluence, and GitLab source records in the weekly
-   context. When evidence is sufficient, the weekly work report should normally be about
+   evidence and reconcile them with the Jira, Confluence, GitLab, and Slack source records in the
+   weekly context. When evidence is sufficient, the weekly work report should normally be about
    3,000-6,000 Korean characters and the feedback about 2,000-4,000 Korean characters; let the
    evidence, not a quota, determine the final length.
 9. If the API or upload fails, keep the server state unchanged, remove temporary files, and

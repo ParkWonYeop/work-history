@@ -25,6 +25,11 @@ class Settings:
     signature_max_age_seconds: int = 300
     ingest_max_uncompressed_bytes: int = 5 * 1024 * 1024
     default_timezone: str = "Asia/Seoul"
+    slack_workspace_url: str = ""
+    slack_app_id: str = ""
+    slack_user_token: str = ""
+    slack_app_token: str = ""
+    slack_history_start: str = "2026-04-01"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -44,6 +49,11 @@ class Settings:
                 os.getenv("INGEST_MAX_UNCOMPRESSED_BYTES", str(5 * 1024 * 1024))
             ),
             default_timezone=os.getenv("DEFAULT_TIMEZONE", "Asia/Seoul"),
+            slack_workspace_url=os.getenv("SLACK_WORKSPACE_URL", "").rstrip("/"),
+            slack_app_id=os.getenv("SLACK_APP_ID", ""),
+            slack_user_token=_read_secret("SLACK_USER_TOKEN"),
+            slack_app_token=_read_secret("SLACK_APP_TOKEN"),
+            slack_history_start=os.getenv("SLACK_HISTORY_START", "2026-04-01"),
         )
 
     def require_atlassian(self) -> None:
@@ -58,6 +68,17 @@ class Settings:
         ]
         if missing:
             raise RuntimeError(f"Missing Atlassian settings: {', '.join(missing)}")
+
+    def require_slack(self, *, socket_mode: bool = False) -> None:
+        required = [
+            ("SLACK_WORKSPACE_URL", self.slack_workspace_url),
+            ("SLACK_USER_TOKEN", self.slack_user_token),
+        ]
+        if socket_mode:
+            required.append(("SLACK_APP_TOKEN", self.slack_app_token))
+        missing = [name for name, value in required if not value]
+        if missing:
+            raise RuntimeError(f"Missing Slack settings: {', '.join(missing)}")
 
 
 @lru_cache(maxsize=1)

@@ -85,8 +85,18 @@ if [ ! -f /etc/work-history/credentials/atlassian-api-token ]; then
   umask 077
   : > /etc/work-history/credentials/atlassian-api-token
 fi
+if [ ! -f /etc/work-history/credentials/slack-user-token ]; then
+  umask 077
+  : > /etc/work-history/credentials/slack-user-token
+fi
+if [ ! -f /etc/work-history/credentials/slack-app-token ]; then
+  umask 077
+  : > /etc/work-history/credentials/slack-app-token
+fi
 chmod 0600 /etc/work-history/credentials/read-api-token \
-  /etc/work-history/credentials/atlassian-api-token
+  /etc/work-history/credentials/atlassian-api-token \
+  /etc/work-history/credentials/slack-user-token \
+  /etc/work-history/credentials/slack-app-token
 
 install -o root -g root -m 0755 "$SOURCE_COPY/deploy/server/backup.sh" "$APP_ROOT/bin/backup.sh"
 for unit in "$SOURCE_COPY"/deploy/server/systemd/*; do
