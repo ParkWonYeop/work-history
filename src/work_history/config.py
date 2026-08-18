@@ -30,6 +30,15 @@ class Settings:
     slack_user_token: str = ""
     slack_app_token: str = ""
     slack_history_start: str = "2026-04-01"
+    raw_archive_dir: str = "/var/lib/work-history/raw-archive"
+    raw_archive_age_recipient: str = ""
+    raw_archive_r2_endpoint: str = ""
+    raw_archive_r2_bucket: str = ""
+    raw_archive_r2_prefix: str = "raw/v1"
+    raw_archive_r2_access_key_id: str = ""
+    raw_archive_r2_secret_access_key: str = ""
+    raw_archive_lookahead_days: int = 7
+    raw_archive_batch_size: int = 5000
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -54,6 +63,23 @@ class Settings:
             slack_user_token=_read_secret("SLACK_USER_TOKEN"),
             slack_app_token=_read_secret("SLACK_APP_TOKEN"),
             slack_history_start=os.getenv("SLACK_HISTORY_START", "2026-04-01"),
+            raw_archive_dir=os.getenv(
+                "RAW_ARCHIVE_DIR", "/var/lib/work-history/raw-archive"
+            ),
+            raw_archive_age_recipient=os.getenv("RAW_ARCHIVE_AGE_RECIPIENT", "").strip(),
+            raw_archive_r2_endpoint=os.getenv("RAW_ARCHIVE_R2_ENDPOINT", "").rstrip("/"),
+            raw_archive_r2_bucket=os.getenv("RAW_ARCHIVE_R2_BUCKET", "").strip(),
+            raw_archive_r2_prefix=os.getenv("RAW_ARCHIVE_R2_PREFIX", "raw/v1").strip("/"),
+            raw_archive_r2_access_key_id=_read_secret(
+                "RAW_ARCHIVE_R2_ACCESS_KEY_ID"
+            ),
+            raw_archive_r2_secret_access_key=_read_secret(
+                "RAW_ARCHIVE_R2_SECRET_ACCESS_KEY"
+            ),
+            raw_archive_lookahead_days=int(
+                os.getenv("RAW_ARCHIVE_LOOKAHEAD_DAYS", "7")
+            ),
+            raw_archive_batch_size=int(os.getenv("RAW_ARCHIVE_BATCH_SIZE", "5000")),
         )
 
     def require_atlassian(self) -> None:
@@ -79,6 +105,31 @@ class Settings:
         missing = [name for name, value in required if not value]
         if missing:
             raise RuntimeError(f"Missing Slack settings: {', '.join(missing)}")
+
+    def require_raw_archive(self) -> None:
+        required = (
+            ("RAW_ARCHIVE_AGE_RECIPIENT", self.raw_archive_age_recipient),
+            ("RAW_ARCHIVE_R2_ENDPOINT", self.raw_archive_r2_endpoint),
+            ("RAW_ARCHIVE_R2_BUCKET", self.raw_archive_r2_bucket),
+            ("RAW_ARCHIVE_R2_ACCESS_KEY_ID", self.raw_archive_r2_access_key_id),
+            ("RAW_ARCHIVE_R2_SECRET_ACCESS_KEY", self.raw_archive_r2_secret_access_key),
+        )
+        missing = [name for name, value in required if not value]
+        if missing:
+            raise RuntimeError(f"Missing raw archive settings: {', '.join(missing)}")
+        if not self.raw_archive_age_recipient.startswith("age1"):
+            raise RuntimeError("RAW_ARCHIVE_AGE_RECIPIENT must be an age X25519 recipient")
+        if not self.raw_archive_r2_endpoint.startswith("https://"):
+            raise RuntimeError("RAW_ARCHIVE_R2_ENDPOINT must use HTTPS")
+        prefix_parts = self.raw_archive_r2_prefix.split("/")
+        if not self.raw_archive_r2_prefix or any(
+            part in {"", ".", ".."} for part in prefix_parts
+        ):
+            raise RuntimeError("RAW_ARCHIVE_R2_PREFIX contains an unsafe path component")
+        if self.raw_archive_batch_size < 1 or self.raw_archive_batch_size > 50_000:
+            raise RuntimeError("RAW_ARCHIVE_BATCH_SIZE must be between 1 and 50000")
+        if self.raw_archive_lookahead_days < 1 or self.raw_archive_lookahead_days > 31:
+            raise RuntimeError("RAW_ARCHIVE_LOOKAHEAD_DAYS must be between 1 and 31")
 
 
 @lru_cache(maxsize=1)

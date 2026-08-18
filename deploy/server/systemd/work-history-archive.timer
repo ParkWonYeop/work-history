@@ -1,0 +1,10 @@
+[Unit]
+Description=Archive expiring raw work-history records daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Seoul
+Persistent=true
+Unit=work-history-archive.service
+
+[Install]
+WantedBy=timers.target

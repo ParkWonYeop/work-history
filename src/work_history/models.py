@@ -155,6 +155,69 @@ class RawRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class RawArchiveBatch(Base):
+    __tablename__ = "raw_archive_batches"
+    __table_args__ = (
+        UniqueConstraint("object_key"),
+        Index("ix_raw_archive_batches_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    local_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="creating")
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_counts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    earliest_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latest_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    plaintext_sha256: Mapped[str | None] = mapped_column(String(64))
+    ciphertext_sha256: Mapped[str | None] = mapped_column(String(64))
+    ciphertext_size: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    local_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    remote_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    entries: Mapped[list[RawArchiveEntry]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan"
+    )
+
+
+class RawArchiveEntry(Base):
+    __tablename__ = "raw_archive_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "source",
+            "record_key",
+            "collected_at",
+            "payload_sha256",
+        ),
+        Index(
+            "ix_raw_archive_entries_lookup",
+            "source",
+            "record_key",
+            "collected_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("raw_archive_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    record_key: Mapped[str] = mapped_column(String(768), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    batch: Mapped[RawArchiveBatch] = relationship(back_populates="entries")
+
+
 class SyncRun(Base):
     __tablename__ = "sync_runs"
 

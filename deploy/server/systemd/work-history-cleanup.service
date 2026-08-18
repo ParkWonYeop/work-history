@@ -1,6 +1,6 @@
 [Unit]
 Description=Remove expired raw work-history records
-After=postgresql.service
+After=postgresql.service work-history-archive.service
 
 [Service]
 Type=oneshot

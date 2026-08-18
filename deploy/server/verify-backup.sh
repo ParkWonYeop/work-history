@@ -47,6 +47,8 @@ BEGIN
     'artifact_versions',
     'activity_events',
     'raw_records',
+    'raw_archive_batches',
+    'raw_archive_entries',
     'sync_runs',
     'sync_cursors',
     'ingest_devices',

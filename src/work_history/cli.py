@@ -51,6 +51,18 @@ def _sync_lock() -> Iterator[None]:
         yield
 
 
+@contextmanager
+def _archive_lock() -> Iterator[None]:
+    path = Path(os.getenv("ARCHIVE_LOCK_FILE", "/tmp/work-history-archive.lock"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another raw archive operation is already running") from exc
+        yield
+
+
 def _collector(source: str, settings: Settings):
     if source == "slack":
         settings.require_slack()
@@ -306,6 +318,20 @@ def build_parser() -> argparse.ArgumentParser:
     slack_daily.add_argument("--date", help="Asia/Seoul date in YYYY-MM-DD; default is yesterday")
     slack_daily.add_argument("--force", action="store_true")
     sub.add_parser("slack-socket")
+    archive = sub.add_parser("archive")
+    archive.add_argument(
+        "--all",
+        action="store_true",
+        help="archive every current raw record without changing its expiry",
+    )
+    archive.add_argument("--max-batches", type=int)
+    archive_verify = sub.add_parser("archive-verify")
+    archive_verify.add_argument("--local-only", action="store_true")
+    sub.add_parser("archive-check")
+    sub.add_parser("archive-list")
+    archive_fetch = sub.add_parser("archive-fetch")
+    archive_fetch.add_argument("--batch-id", required=True)
+    archive_fetch.add_argument("--output", type=Path, required=True)
     sub.add_parser("cleanup")
     return parser
 
@@ -370,6 +396,33 @@ def main() -> None:
         from work_history.slack_socket import run_slack_socket
 
         run_slack_socket(settings, session_factory)
+        return
+    if args.command in {"archive", "archive-verify", "archive-check", "archive-fetch"}:
+        from work_history.raw_archive import R2Store, RawArchiveManager
+
+        settings.require_raw_archive()
+        store = R2Store(settings)
+        manager = RawArchiveManager(settings, session_factory, store)
+        with _archive_lock():
+            if args.command == "archive":
+                result = manager.archive_pending(
+                    include_current=args.all,
+                    max_batches=args.max_batches,
+                )
+            elif args.command == "archive-verify":
+                result = manager.verify_all(remote=not args.local_only)
+            elif args.command == "archive-check":
+                result = store.check()
+            else:
+                result = manager.fetch(args.batch_id, args.output.resolve())
+        print(json.dumps(result))
+        return
+    if args.command == "archive-list":
+        from work_history.raw_archive import list_archive_batches
+
+        with session_factory() as session:
+            result = list_archive_batches(session)
+        print(json.dumps(result))
         return
     if args.command == "cleanup":
         with session_factory() as session:

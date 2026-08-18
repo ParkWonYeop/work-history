@@ -15,16 +15,32 @@ if [ ! -f "$SOURCE_DIR/pyproject.toml" ] || [ ! -f "$SOURCE_DIR/alembic.ini" ]; 
   echo "Project files are missing." >&2
   exit 1
 fi
+SENSITIVE_FILE=$(find "$SOURCE_DIR" \
+  \( -path "$SOURCE_DIR/.git" -o -path "$SOURCE_DIR/.venv" \) -prune -o \
+  -type f \( \
+    -name '*.age' -o \
+    -name '*.jsonl' -o \
+    -name 'work-history-age-recovery-key*' -o \
+    -name 'r2-access-key-id' -o \
+    -name 'r2-secret-access-key' -o \
+    -name 'r2-credentials*' \
+  \) -print -quit)
+if [ -n "$SENSITIVE_FILE" ]; then
+  echo "Refusing to install while a raw archive, recovery key, or R2 credential is in the source tree." >&2
+  exit 1
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  age \
   ca-certificates \
   curl \
   nftables \
   postgresql \
   postgresql-client \
   python3 \
-  python3-venv
+  python3-venv \
+  zstd
 
 if ! getent group workhistory >/dev/null; then
   groupadd --system workhistory
@@ -36,6 +52,7 @@ fi
 
 install -d -o root -g root -m 0755 "$APP_ROOT" "$APP_ROOT/bin"
 install -d -o workhistory -g workhistory -m 0750 /var/lib/work-history
+install -d -o workhistory -g workhistory -m 0700 /var/lib/work-history/raw-archive
 install -d -o workhistory -g workhistory -m 0700 /var/backups/work-history
 install -d -o root -g root -m 0750 /etc/work-history
 install -d -o root -g root -m 0700 /etc/work-history/credentials
@@ -51,10 +68,24 @@ fi
 rm -rf -- "$SOURCE_COPY"
 install -d -o root -g root -m 0755 "$SOURCE_COPY"
 tar -C "$SOURCE_DIR" \
+  --exclude=.git \
   --exclude=.venv \
   --exclude=.pytest_cache \
+  --exclude=.ruff_cache \
+  --exclude=.report-tmp \
+  --exclude=exports \
+  --exclude='.env*' \
+  --exclude='*.age' \
+  --exclude='*.jsonl' \
+  --exclude='*.db' \
+  --exclude='*.db-shm' \
+  --exclude='*.db-wal' \
   --exclude='*.egg-info' \
   --exclude='__pycache__' \
+  --exclude='work-history-age-recovery-key*' \
+  --exclude='r2-access-key-id' \
+  --exclude='r2-secret-access-key' \
+  --exclude='r2-credentials*' \
   -cf - . | tar --no-overwrite-dir -C "$SOURCE_COPY" -xf -
 
 python3 -m venv "$APP_ROOT/venv"
@@ -86,6 +117,10 @@ if [ ! -f /etc/work-history/server.env ]; then
   install -o root -g workhistory -m 0640 \
     "$SOURCE_COPY/deploy/server/server.env.example" /etc/work-history/server.env
 fi
+if [ ! -f /etc/work-history/archive.env ]; then
+  install -o root -g workhistory -m 0640 \
+    "$SOURCE_COPY/deploy/server/archive.env.example" /etc/work-history/archive.env
+fi
 if [ ! -f /etc/work-history/credentials/read-api-token ]; then
   umask 077
   openssl rand -base64 32 | tr -d '\n' > /etc/work-history/credentials/read-api-token
@@ -102,10 +137,20 @@ if [ ! -f /etc/work-history/credentials/slack-app-token ]; then
   umask 077
   : > /etc/work-history/credentials/slack-app-token
 fi
+if [ ! -f /etc/work-history/credentials/r2-access-key-id ]; then
+  umask 077
+  : > /etc/work-history/credentials/r2-access-key-id
+fi
+if [ ! -f /etc/work-history/credentials/r2-secret-access-key ]; then
+  umask 077
+  : > /etc/work-history/credentials/r2-secret-access-key
+fi
 chmod 0600 /etc/work-history/credentials/read-api-token \
   /etc/work-history/credentials/atlassian-api-token \
   /etc/work-history/credentials/slack-user-token \
-  /etc/work-history/credentials/slack-app-token
+  /etc/work-history/credentials/slack-app-token \
+  /etc/work-history/credentials/r2-access-key-id \
+  /etc/work-history/credentials/r2-secret-access-key
 
 install -o root -g root -m 0755 "$SOURCE_COPY/deploy/server/backup.sh" "$APP_ROOT/bin/backup.sh"
 install -o root -g root -m 0755 \
@@ -122,7 +167,8 @@ done
 )
 
 systemctl daemon-reload
-systemctl enable --now work-history-api.service
+systemctl enable work-history-api.service
+systemctl restart work-history-api.service
 systemctl enable --now work-history-backup.timer work-history-cleanup.timer
 
 echo "Server installed. Edit /etc/work-history/server.env and run configure-atlassian.sh."

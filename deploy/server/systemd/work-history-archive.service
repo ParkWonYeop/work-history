@@ -1,0 +1,31 @@
+[Unit]
+Description=Encrypt and mirror expiring raw work-history records
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+EnvironmentFile=/etc/work-history/archive.env
+Environment=RAW_ARCHIVE_R2_ACCESS_KEY_ID_FILE=%d/r2-access-key-id
+Environment=RAW_ARCHIVE_R2_SECRET_ACCESS_KEY_FILE=%d/r2-secret-access-key
+Environment=ARCHIVE_LOCK_FILE=/run/work-history/archive.lock
+LoadCredential=r2-access-key-id:/etc/work-history/credentials/r2-access-key-id
+LoadCredential=r2-secret-access-key:/etc/work-history/credentials/r2-secret-access-key
+ExecStartPre=/opt/work-history/venv/bin/work-history archive-check
+ExecStart=/opt/work-history/venv/bin/work-history archive
+RuntimeDirectory=work-history
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/work-history/raw-archive
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

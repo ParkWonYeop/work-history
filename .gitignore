@@ -18,6 +18,13 @@ build/
 .env.*
 *.pem
 *.key
+*.jsonl
+*.jsonl.zst.age
+work-history-age-recovery-key*
+r2-access-key-id
+r2-secret-access-key
+r2-credentials*
+raw-archive/
 config.local.toml
 work-history.db
 *.db

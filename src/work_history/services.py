@@ -373,11 +373,24 @@ def remember_nonce(
 
 
 def cleanup_expired(session: Session) -> dict[str, int]:
+    from work_history.raw_archive import RawSnapshot, verified_fingerprints
+
     now = utcnow()
-    raw_result = session.execute(delete(RawRecord).where(RawRecord.expires_at < now))
+    expired = list(session.scalars(select(RawRecord).where(RawRecord.expires_at < now)))
+    snapshots = [RawSnapshot.from_model(record) for record in expired]
+    verified = verified_fingerprints(session, snapshots)
+    archived_raw_records = 0
+    retained_raw_records = 0
+    for record, snapshot in zip(expired, snapshots, strict=True):
+        if snapshot.fingerprint in verified:
+            session.delete(record)
+            archived_raw_records += 1
+        else:
+            retained_raw_records += 1
     nonce_result = session.execute(delete(IngestNonce).where(IngestNonce.expires_at < now))
     return {
-        "raw_records": raw_result.rowcount or 0,
+        "raw_records": archived_raw_records,
+        "unarchived_raw_records": retained_raw_records,
         "nonces": nonce_result.rowcount or 0,
     }
 

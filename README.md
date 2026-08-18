@@ -20,6 +20,8 @@ flowchart LR
     M -->|"Ed25519 서명 HTTPS"| N["Nginx Proxy Manager"]
     N -->|"HTTP :8080<br/>NPM 주소만 허용"| L
     L --> P[("PostgreSQL<br/>Unix socket only")]
+    L -->|"zstd → age"| A["로컬 암호화 원본 아카이브"]
+    A -->|"S3 호환 HTTPS · SHA-256 재검증"| R2["Cloudflare R2<br/>비공개 · Bucket Lock"]
     C["Codex Report Automation<br/>매일 11:00 KST · Sol/high"] -->|"Ed25519 서명 HTTPS"| N
     R["Report Reader"] -->|"Bearer HTTPS"| N
 ```
@@ -33,6 +35,7 @@ flowchart LR
 | GitLab Agent | 업무용 macOS | VPN 연결 시 본인 GitLab 활동 수집 및 서명 전송 |
 | Slack 수집기 | Debian 13 LXC | 참여 중인 대화의 실시간 이벤트 수신, 전날 메시지 재검증 |
 | Report Agent | Codex를 실행하는 macOS | 보고서 문맥 조회와 Markdown 업로드 |
+| Raw Archive | LXC와 Cloudflare R2 | 원본 JSONL을 zstd 압축·age 암호화해 영구 이중 보관 |
 | Nginx Proxy Manager | 별도 게스트 권장 | 공인 HTTPS 종료 후 LXC 8080으로 전달 |
 | Proxmox | 내부 서버 | 비권한 LXC, 방화벽, 게스트 백업 제공 |
 
@@ -57,8 +60,11 @@ src/work_history/                 애플리케이션 소스
   report_agent.py                Codex용 서명 보고서 클라이언트
   models.py                      SQLAlchemy 데이터 모델
   reports.py                     보고서 문맥·상태·버전 처리
+  raw_archive.py                 결정적 JSONL·압축·암호화·R2 검증
 deploy/server/                   LXC 설치·자격증명·백업·systemd
 deploy/macos/                    macOS 에이전트 설치·업데이트·LaunchAgent
+  create-archive-key.sh          age 키 생성·Keychain 등록
+  decrypt-archive.sh             암호화 원본 복원
 deploy/npm/advanced.conf         NPM Advanced 설정
 deploy/proxmox/lxc-spec.md       권장 LXC 사양과 방화벽
 deploy/alembic/                  DB 마이그레이션
@@ -80,6 +86,10 @@ WORK_HISTORY_API_USAGE.md        읽기 API 상세 사용법
 - Report Agent 개인키는 별도 Keychain 서비스 `com.workhistory.report-agent`에 저장된다.
 - GitLab 수신 장치와 Report Agent는 서버에서 목적이 다른 장치로 등록된다. 키를 서로 재사용하지 않는다.
 - 읽기 API는 별도의 256비트 Bearer 토큰을 사용한다.
+- 원본 아카이브의 age 개인키는 서버에 두지 않는다. Mac Keychain과 별도 비밀번호 관리자 복구본에만
+  저장하며, 서버에는 age 공개 수신자 키만 둔다.
+- R2 자격증명은 `work-history-archive` 버킷 전용 Object Read & Write 키를 systemd credential로
+  전달한다. 설정 파일과 Git에는 저장하지 않는다.
 
 ### 서명 요청
 
@@ -117,6 +127,7 @@ DB 저장과 GitLab 체크포인트 변경은 같은 트랜잭션에서 처리�
 - Jira·Confluence에 접근 가능한 본인 Atlassian 계정과 API 토큰
 - GitLab PAT: 필요한 프로젝트를 읽을 수 있는 최소 권한의 `read_api` 사용 권장
 - 설치 완료된 Slack 앱의 `xoxp-` 사용자 토큰과 `connections:write` 전용 `xapp-` 앱 토큰
+- Cloudflare R2 Standard 비공개 버킷과 해당 버킷 전용 Object Read & Write API 토큰
 - 보고서를 읽을 클라이언트용 Bearer 토큰은 설치 중 서버가 생성
 
 ### Mac
@@ -125,6 +136,7 @@ DB 저장과 GitLab 체크포인트 변경은 같은 트랜잭션에서 처리�
 - 업무시간 중 켜져 있고, 사용자가 필요할 때 FortiClient VPN에 직접 로그인할 수 있어야 함
 - VPN 연결 상태에서 사내 GitLab URL에 브라우저 또는 `curl`로 접근 가능해야 함
 - 외부의 `https://work-history.example.com`으로 HTTPS 요청 가능
+- 원본 복원용 `age`, `zstd` 명령(예: `brew install age zstd`)
 
 ## 5. Proxmox LXC 만들기
 
@@ -229,13 +241,13 @@ cd work-history
 
 설치 스크립트는 root로 실행해야 한다. 다음 작업을 수행한다.
 
-- PostgreSQL, Python, venv와 필수 패키지 설치
+- PostgreSQL, Python, age, zstd, venv와 필수 패키지 설치
 - `workhistory` 시스템 사용자·DB·DB role 생성
 - 소스를 `/opt/work-history/source`로 복사하고 `/opt/work-history/venv` 설치
 - `/etc/work-history` 설정·credential 디렉터리 생성
 - 읽기 API 토큰 생성
 - Alembic migration 적용
-- API, 백업, 원본 정리 systemd unit 설치
+- API, 백업, 원본 아카이브·검증·정리 systemd unit 설치
 
 ### 서버 환경 설정
 
@@ -325,6 +337,8 @@ DB를 갱신하지 않는다.
 - 증분 수집: 부팅 5분 후 시작, 이후 약 10분마다
 - 최근 재검증: 매일 03:30 KST, 최근 14일
 - raw 원본 정리: 매일 04:10 KST
+- 원본 암호화 아카이브: 매일 03:30 KST
+- 로컬·R2 전체 무결성 검사: 매주 일요일 05:00 KST
 - DB 백업: 매일 02:30 KST
 
 ## 9A. Slack 앱과 초기 수집
@@ -596,17 +610,90 @@ context 응답의 `source_total_event_counts`는 DB 전체 건수, `source_event
 - `artifacts`, `artifact_versions`: 이슈·페이지·MR 등 업무 대상과 버전
 - `activity_events`: 정규화한 활동 이벤트
 - `raw_records`: 수집 당시 원본 API JSON
+- `raw_archive_batches`, `raw_archive_entries`: 암호화 객체 상태·체크섬과 원본 레코드 지문
 - `sync_runs`, `sync_cursors`: 실행 결과와 source 체크포인트
 - `ingest_devices`, `ingest_nonces`, `ingest_batches`: 장치 키·재전송 방어·batch 처리
 - `generated_reports`, `generated_report_versions`: 현재 보고서와 immutable revision
 
-모든 시각은 DB에 UTC로 저장한다. 보고서와 날짜 경계는 `Asia/Seoul`로 계산한다. raw API JSON은 기본
-180일 후 삭제하지만 정규화된 활동·문맥·보고서와 버전은 유지한다.
+모든 시각은 DB에 UTC로 저장한다. 보고서와 날짜 경계는 `Asia/Seoul`로 계산한다. raw API JSON은 DB에
+180일간 유지한다. 만료된 원본은 같은 `source`, `record_key`, `collected_at`, payload SHA-256 지문이
+로컬과 R2 양쪽에서 검증된 경우에만 DB에서 삭제한다. 정규화된 활동·문맥·보고서와 버전은 계속 유지한다.
 
 DB와 백업에는 이슈·댓글·문서 본문이 포함될 수 있으므로 디스크 암호화, Proxmox 관리자 접근 제한,
 백업 저장소 암호화와 보존 정책이 필요하다.
 
-## 14. 백업과 복원 시험
+## 14. 원본 JSON 영구 암호화 아카이브
+
+아카이브는 정렬된 JSONL v1을 평문 임시파일 없이 `zstd -19`로 압축하고 age X25519 공개키로
+암호화한다. 객체명은 `raw/v1/YYYY/MM/<UTC시각>-<UUID>.jsonl.zst.age`이며 기존 객체를 덮어쓰지
+않는다. 암호문 SHA-256, 크기, 레코드·소스별 건수와 수집 기간을 DB에 기록한다.
+
+### 14.1 age 키 만들기
+
+Mac에서 실행한다. 복구 파일 경로는 Git 저장소 밖의 새 경로여야 한다.
+
+```sh
+brew install age zstd
+deploy/macos/create-archive-key.sh \
+  "$HOME/Documents/work-history-age-recovery-key.txt"
+```
+
+출력된 `age1...` 공개키는 서버 설정에 사용한다. 복구 파일의 개인키를 비밀번호 관리자에 첨부하거나
+보안 메모로 저장하고 실제 복호화 시험을 마친 뒤 Mac의 평문 복구 파일을 안전하게 제거한다. 개인키는
+Keychain 서비스 `com.workhistory.raw-archive`, 계정 `age-identity`에도 저장된다. 복구본 확인 전에는
+R2 무기한 Bucket Lock을 설정하지 않는다. 개인키 두 복사본을 모두 잃으면 아카이브를 복구할 수 없다.
+
+### 14.2 R2 버킷 만들기
+
+Cloudflare에서 다음과 같이 구성한다.
+
+1. Standard 클래스의 비공개 버킷 `work-history-archive`를 생성한다.
+2. 공개 개발 URL과 custom domain을 연결하지 않고 lifecycle 삭제 규칙도 만들지 않는다.
+3. 해당 버킷 하나에만 Object Read & Write 권한을 가진 S3 API 자격증명을 만든다.
+4. Mac Keychain과 비밀번호 관리자 복구본을 확인한 뒤 `raw/v1/` prefix에 보존 기간 없는 Bucket Lock을
+   적용한다. 이 잠금은 삭제뿐 아니라 같은 키 덮어쓰기도 막으므로 시험용 객체는 잠기지 않은 별도
+   prefix에서 먼저 검증한다.
+
+버킷 생성 전 회사 업무 자료를 개인 Cloudflare 계정에 암호화해 국외 또는 외부 보관하는 것이 허용되는지
+확인한다. R2 사용량과 요청량이 무료 한도를 넘으면 Cloudflare 요금이 발생할 수 있다.
+
+### 14.3 서버 설정과 초기 아카이브
+
+서버에서 다음 스크립트를 실행해 Account ID, age 공개키, R2 Access Key ID와 Secret을 입력한다.
+Secret은 화면과 명령행에 표시되지 않고 systemd credential 파일에만 저장된다.
+
+```sh
+/opt/work-history/source/deploy/server/configure-archive.sh
+systemctl start work-history-archive-initial.service
+systemctl status work-history-archive-initial.service --no-pager
+```
+
+초기 서비스는 DB에 현재 존재하는 원본 전체를 아카이브한다. 성공 전에는 원본을 삭제하지 않는다.
+운영 명령은 다음과 같다.
+
+```sh
+work-history archive-list
+systemctl start work-history-archive-verify.service
+journalctl -u work-history-archive.service -n 100 --no-pager
+work-history archive-fetch --batch-id BATCH_ID \
+  --output /secure/path/archive.jsonl.zst.age
+```
+
+복호화는 Mac에서 수행한다. 출력 파일도 민감한 평문이므로 암호화 디스크에서만 만들고 사용 후 안전하게
+제거한다. 도구가 manifest 건수, source별 건수와 모든 payload SHA-256을 검증한다.
+
+```sh
+deploy/macos/decrypt-archive.sh \
+  /secure/path/archive.jsonl.zst.age \
+  /secure/path/archive.jsonl
+```
+
+R2 장애, 암호화 실패, 로컬·원격 해시 불일치가 하나라도 있으면 배치는 완료되지 않고 cleanup도 해당
+원본을 삭제하지 않는다. 재수집으로 본문이나 수집 시각이 바뀌면 지문이 달라져 새 버전으로 다시
+아카이브된다. 매일 03:30 KST에는 만료 7일 전 원본을 아카이브하고, 매주 일요일 05:00 KST에는 모든
+로컬·R2 암호문을 다시 읽어 SHA-256을 검증한다.
+
+## 15. 백업과 복원 시험
 
 매일 생성되는 PostgreSQL custom-format backup은 `/var/backups/work-history`에 저장되며 14일간
 보존된다.
@@ -627,13 +714,15 @@ sudo -u postgres psql -d workhistory_restore_test -c '\\dt'
 ```
 
 실제 복원은 서비스를 중지하고 현재 DB 백업을 하나 더 만든 뒤 수행해야 한다. 실제 운영 DB 삭제는 이
-문서의 복원 시험 명령에 포함하지 않는다. 현재 자동 백업은 같은 LXC 저장소에 있으므로 호스트·스토리지
-동시 장애에는 취약하다. 중요도가 높아지면 Proxmox guest backup을 별도 물리 스토리지에 구성한다.
+문서의 복원 시험 명령에 포함하지 않는다. 현재 PostgreSQL 자동 백업은 같은 LXC 저장소에 있으므로
+호스트·스토리지 동시 장애에는 취약하다. R2는 원본 JSON 암호문만 외부에 보존하며 정규화 데이터와
+보고서의 DB 백업을 대신하지 않는다. 중요도가 높아지면 Proxmox guest backup을 별도 물리 스토리지에
+구성한다.
 
 생성 보고서는 수집 기록을 해석한 2차 문서다. 업무 증빙으로 사용할 때는 보고서만 제시하지 말고
 원본 Jira·Confluence·GitLab·Slack 링크, 발생 시각과 저장된 버전을 함께 제시한다.
 
-## 15. 업데이트
+## 16. 업데이트
 
 LXC에서:
 
@@ -655,7 +744,7 @@ deploy/macos/update-agent.sh
 deploy/macos/update-report-agent.sh
 ```
 
-## 16. 문제 해결
+## 17. 문제 해결
 
 ### GitLab checkpoint가 오래됨
 
@@ -714,7 +803,16 @@ route -n get gitlab.internal.example
 에이전트를 root로 실행하지 않는다. 설치한 macOS 사용자와 LaunchAgent 사용자가 같아야 한다. 키를
 출력하거나 파일로 내보내지 말고, PAT만 `set-token` 명령으로 교체한다.
 
-## 17. 개발과 테스트
+### 원본 아카이브가 실패함
+
+- `work-history archive-check`로 R2 버킷 접근을 확인한다.
+- `journalctl -u work-history-archive.service`에서 age, zstd, R2 또는 checksum 오류를 확인한다.
+- `local_verified` 배치는 다음 실행에서 같은 객체를 먼저 검증한다. 이미 올바르게 존재하면 덮어쓰지 않고
+  완료 처리한다.
+- 오류 중에는 04:10 cleanup이 해당 원본을 보존한다. 문제 해결 전 DB raw를 수동 삭제하지 않는다.
+- 개인키는 서버 장애 해결에 필요하지 않으며 서버로 복사해서는 안 된다.
+
+## 18. 개발과 테스트
 
 Python 3.11 이상이 필요하다.
 
@@ -736,7 +834,7 @@ export READ_API_TOKEN='development-only-token'
 
 개발 토큰은 운영에 사용하지 않는다. `.env`, DB, report export, Keychain 값은 Git에 추가하지 않는다.
 
-## 18. 운영 전 최종 점검
+## 19. 운영 전 최종 점검
 
 - [ ] 회사 정책상 Jira·Confluence·GitLab·Slack 데이터의 개인 Proxmox 보관이 허용됨
 - [ ] LXC는 비권한이고 불필요한 기능이 꺼져 있음
@@ -752,4 +850,10 @@ export READ_API_TOKEN='development-only-token'
 - [ ] VPN 중단·Mac 재시작·LXC 재시작 후 checkpoint 재개를 검증함
 - [ ] 중복 batch·잘못된 서명·nonce 재사용·만료 timestamp가 거부됨
 - [ ] 매일 backup이 생성되고 별도 DB 복원 시험을 통과함
+- [ ] R2 버킷은 비공개이며 public URL·lifecycle 삭제 규칙이 없음
+- [ ] age 개인키가 Mac Keychain과 비밀번호 관리자 복구본 두 곳에 있고 서버·Git에는 없음
+- [ ] 잠기지 않은 시험 prefix에서 업로드·다운로드·해시 검증 후 `raw/v1/` 무기한 Lock을 적용함
+- [ ] 초기 전체 아카이브의 DB·JSONL 건수와 로컬·R2 SHA-256이 일치함
+- [ ] Mac에서 실제 객체 하나를 복호화하고 manifest·payload 해시 검증을 통과함
+- [ ] 03:30 archive, 04:10 cleanup, 일요일 05:00 verify timer가 활성화됨
 - [ ] 업무 보고서와 export가 Git 저장소에 포함되지 않음
