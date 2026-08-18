@@ -21,7 +21,7 @@ class Settings:
     atlassian_email: str
     atlassian_api_token: str
     public_base_url: str
-    raw_retention_days: int = 30
+    raw_retention_days: int = 180
     signature_max_age_seconds: int = 300
     ingest_max_uncompressed_bytes: int = 5 * 1024 * 1024
     default_timezone: str = "Asia/Seoul"
@@ -43,7 +43,7 @@ class Settings:
             atlassian_email=os.getenv("ATLASSIAN_EMAIL", ""),
             atlassian_api_token=_read_secret("ATLASSIAN_API_TOKEN"),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "").rstrip("/"),
-            raw_retention_days=int(os.getenv("RAW_RETENTION_DAYS", "30")),
+            raw_retention_days=int(os.getenv("RAW_RETENTION_DAYS", "180")),
             signature_max_age_seconds=int(os.getenv("SIGNATURE_MAX_AGE_SECONDS", "300")),
             ingest_max_uncompressed_bytes=int(
                 os.getenv("INGEST_MAX_UNCOMPRESSED_BYTES", str(5 * 1024 * 1024))

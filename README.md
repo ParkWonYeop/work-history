@@ -254,7 +254,7 @@ SLACK_APP_ID=A0123456789
 SLACK_HISTORY_START=2026-04-01
 PUBLIC_BASE_URL=https://work-history.example.com
 DEFAULT_TIMEZONE=Asia/Seoul
-RAW_RETENTION_DAYS=30
+RAW_RETENTION_DAYS=180
 FORWARDED_ALLOW_IPS=NPM_LAN_IP
 LOG_LEVEL=INFO
 ```
@@ -588,7 +588,7 @@ context 응답의 `source_total_event_counts`는 DB 전체 건수, `source_event
 - `generated_reports`, `generated_report_versions`: 현재 보고서와 immutable revision
 
 모든 시각은 DB에 UTC로 저장한다. 보고서와 날짜 경계는 `Asia/Seoul`로 계산한다. raw API JSON은 기본
-30일 후 삭제하지만 정규화된 활동·문맥·보고서와 버전은 유지한다.
+180일 후 삭제하지만 정규화된 활동·문맥·보고서와 버전은 유지한다.
 
 DB와 백업에는 이슈·댓글·문서 본문이 포함될 수 있으므로 디스크 암호화, Proxmox 관리자 접근 제한,
 백업 저장소 암호화와 보존 정책이 필요하다.
