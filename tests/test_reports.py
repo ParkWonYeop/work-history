@@ -9,8 +9,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from work_history.api import create_app
-from work_history.models import ActivityEvent, Artifact, IngestDevice, SyncCursor
-from work_history.reports import source_snapshot
+from work_history.models import (
+    ActivityEvent,
+    Artifact,
+    IngestDevice,
+    SourceIdentity,
+    SyncCursor,
+)
+from work_history.reports import _select_report_events, source_snapshot
 from work_history.security import b64url_encode, sign_request
 
 
@@ -158,6 +164,216 @@ def test_report_context_redacts_content_and_enforces_device_purpose(
     assert "should-hide" not in serialized
     assert "[REDACTED]" in serialized
     assert result["redaction_count"] >= 3
+
+
+def test_report_context_selects_only_relevant_slack_collaboration(
+    settings, session_factory
+) -> None:
+    private = _device(session_factory, "report-mac", "report_agent")
+    start = datetime(2026, 3, 31, 16, 0, tzinfo=UTC)
+    with session_factory() as session:
+        session.add(
+            SourceIdentity(
+                source="slack",
+                remote_id="U_SELF",
+                display_name="본인",
+                is_self=True,
+            )
+        )
+
+        def artifact(remote_id: str, body: str) -> Artifact:
+            model = Artifact(
+                source="slack",
+                remote_id=remote_id,
+                kind="slack_message",
+                title=remote_id,
+                body_text=body,
+            )
+            session.add(model)
+            session.flush()
+            return model
+
+        self_reply = artifact("T:C1:101.000", "제가 처리하겠습니다")
+        thread_root = artifact("T:C1:100.000", "이 작업을 확인해 주세요")
+        mention = artifact("T:C2:200.000", "<@U_SELF> 배포 검토 부탁드립니다")
+        direct_message = artifact("T:D1:300.000", "진행 상황을 알려주세요")
+        unrelated = artifact("T:C3:400.000", "다른 팀의 일반 대화")
+
+        events = [
+            ActivityEvent(
+                source="jira",
+                event_key="jira:1",
+                kind="issue",
+                action="changed",
+                occurred_at=start,
+                actor_is_self=True,
+                title="Jira 작업",
+                changes={},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:self-reply",
+                kind="slack_thread_reply",
+                action="thread_replied",
+                occurred_at=start.replace(minute=1),
+                actor_remote_id="U_SELF",
+                actor_is_self=True,
+                artifact=self_reply,
+                artifact_remote_id=self_reply.remote_id,
+                title="본인 답글",
+                changes={"channel_id": "C1", "thread_ts": "100.000"},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:thread-root",
+                kind="slack_message",
+                action="message_posted",
+                occurred_at=start.replace(minute=2),
+                actor_remote_id="U_OTHER",
+                actor_is_self=False,
+                artifact=thread_root,
+                artifact_remote_id=thread_root.remote_id,
+                title="참여 스레드",
+                changes={"channel_id": "C1", "thread_ts": None},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:mention",
+                kind="slack_message",
+                action="message_posted",
+                occurred_at=start.replace(minute=3),
+                actor_remote_id="U_OTHER",
+                actor_is_self=False,
+                artifact=mention,
+                artifact_remote_id=mention.remote_id,
+                title="본인 멘션",
+                changes={"channel_id": "C2", "conversation_type": "public_channel"},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:reaction",
+                kind="slack_reaction",
+                action="reaction_added",
+                occurred_at=start.replace(minute=4),
+                actor_remote_id="U_OTHER",
+                actor_is_self=False,
+                artifact=self_reply,
+                artifact_remote_id=self_reply.remote_id,
+                title="본인 메시지 반응",
+                changes={"channel_id": "C1", "reaction": "white_check_mark"},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:dm",
+                kind="slack_message",
+                action="message_posted",
+                occurred_at=start.replace(minute=5),
+                actor_remote_id="U_OTHER",
+                actor_is_self=False,
+                artifact=direct_message,
+                artifact_remote_id=direct_message.remote_id,
+                title="DM",
+                changes={"channel_id": "D1", "conversation_type": "im"},
+            ),
+            ActivityEvent(
+                source="slack",
+                event_key="slack:unrelated",
+                kind="slack_message",
+                action="message_posted",
+                occurred_at=start.replace(minute=6),
+                actor_remote_id="U_OTHER",
+                actor_is_self=False,
+                artifact=unrelated,
+                artifact_remote_id=unrelated.remote_id,
+                title="무관한 대화",
+                changes={"channel_id": "C3", "conversation_type": "public_channel"},
+            ),
+        ]
+        session.add_all(events)
+        for source in ("jira", "confluence", "gitlab", "slack"):
+            session.add(
+                SyncCursor(
+                    source=source,
+                    stream=(
+                        "work-mac"
+                        if source == "gitlab"
+                        else ("coverage" if source == "slack" else "default")
+                    ),
+                    cursor={"until": "2026-04-03T00:00:00+00:00"},
+                )
+            )
+        session.commit()
+
+    response = _request(
+        TestClient(create_app(settings, session_factory)),
+        private,
+        "report-mac",
+        "POST",
+        "/v1/report-agent/context",
+        {"cadence": "daily", "period": "2026-04-01"},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["activity_count"] == 6
+    assert result["source_total_event_counts"]["slack"] == 6
+    assert result["source_event_counts"]["slack"] == 5
+    assert result["omitted_activity_count"] == 1
+    assert result["selection_applied"] is True
+    assert result["truncated"] is False
+    titles = [item["title"] for item in result["activities"]]
+    assert "무관한 대화" not in titles
+    assert titles == [
+        "Jira 작업",
+        "본인 답글",
+        "참여 스레드",
+        "본인 멘션",
+        "본인 메시지 반응",
+        "DM",
+    ]
+
+
+def test_report_event_limit_keeps_source_and_self_priority_in_time_order() -> None:
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    events = [
+        ActivityEvent(
+            id="jira",
+            source="jira",
+            event_key="jira",
+            kind="issue",
+            action="changed",
+            occurred_at=base.replace(hour=3),
+            actor_is_self=True,
+            title="Jira",
+            changes={},
+        ),
+        ActivityEvent(
+            id="self",
+            source="slack",
+            event_key="self",
+            kind="slack_message",
+            action="message_posted",
+            occurred_at=base.replace(hour=1),
+            actor_is_self=True,
+            artifact_remote_id="T:C:1",
+            title="Self",
+            changes={"channel_id": "C"},
+        ),
+        ActivityEvent(
+            id="dm",
+            source="slack",
+            event_key="dm",
+            kind="slack_message",
+            action="message_posted",
+            occurred_at=base.replace(hour=2),
+            actor_is_self=False,
+            artifact_remote_id="T:D:2",
+            title="DM",
+            changes={"channel_id": "D", "conversation_type": "im"},
+        ),
+    ]
+    selected, truncated = _select_report_events(events, {}, set(), maximum=2)
+    assert truncated is True
+    assert [item.id for item in selected] == ["self", "jira"]
 
 
 def test_report_upsert_is_idempotent_and_keeps_revisions(settings, session_factory) -> None:

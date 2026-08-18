@@ -264,6 +264,9 @@ class ReportContextResponse(BaseModel):
     to_time: datetime
     activity_count: int
     source_event_counts: dict[str, int]
+    source_total_event_counts: dict[str, int] = Field(default_factory=dict)
+    omitted_activity_count: int = 0
+    selection_applied: bool = False
     activities: list[ActivityItem]
     artifacts: list[ReportContextArtifact]
     daily_documents: list[ReportContextDailyDocument] = Field(default_factory=list)

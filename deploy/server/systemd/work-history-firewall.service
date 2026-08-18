@@ -1,0 +1,22 @@
+[Unit]
+Description=Restrict the work-history API to Nginx Proxy Manager
+After=network-pre.target nftables.service
+Wants=nftables.service
+Before=network.target work-history-api.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet work_history
+ExecStart=/usr/sbin/nft --file /etc/work-history/work-history.nft
+ExecReload=/usr/sbin/nft --file /etc/work-history/work-history.nft
+ExecStop=/usr/sbin/nft delete table inet work_history
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

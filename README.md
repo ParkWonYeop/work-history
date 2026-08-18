@@ -149,6 +149,14 @@ LXC IP를 사용한다.
 | LXC inbound TCP 5432 | 허용하지 않음 |
 | LXC outbound | DNS, NTP, HTTPS, 설치 중 필요한 패키지 저장소 |
 
+서버 설치 후 전용 nftables 규칙으로 8080을 NPM 주소에만 허용한다. 이 규칙은 별도
+`inet work_history` 테이블을 사용하므로 SSH와 기존 방화벽 규칙을 변경하지 않는다.
+
+```sh
+/opt/work-history/source/deploy/server/configure-firewall.sh NPM_LAN_IP
+nft list table inet work_history
+```
+
 ## 6. SSH 공개키와 임시 포트포워딩
 
 키는 **접속을 시작할 Mac에서** 생성한다. LXC나 원격 서버에서 생성하지 않는다.
@@ -475,6 +483,10 @@ Codex 앱에서 이 저장소를 작업 폴더로 선택하고 로컬 자동화�
 - 알림: 실패한 실행만 알림 권장
 
 자동화는 전날의 누락 또는 source snapshot이 변경된 `partial` 보고서를 찾아 다음 두 문서를 생성한다.
+공식 클라이언트와 설정은 각각
+`$HOME/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-report-agent`와
+같은 디렉터리의 `config.toml`을 명시적으로 사용한다. 운영 시작일은 2026-08-17이며 그 이전 보고서는
+자동으로 재생성하지 않는다.
 
 - `work_report`: 종합 정리, 업무 흐름 요약, 시간순 진행, 업무별 배경·목표·구체적 행동·판단·결과,
   결정·협업·문서화, 장애와 미해결 사항, 우선순위별 다음 작업, 데이터 완전성과 근거 링크
@@ -490,6 +502,10 @@ Codex 앱에서 이 저장소를 작업 폴더로 선택하고 로컬 자동화�
 생성한다. 매월 1일에는 전월의 일간 문서를 보조 근거로 월간 업무 보고서와 피드백도 생성한다. 활동이
 없는 날은 추론하지 않고 deterministic template으로 기록한다. Jira·Confluence·GitLab·Slack 중 하나라도
 기간 끝까지 수집되지 않았으면 문서는 `partial`, 모두 최신이면 `final`이다.
+
+Slack 원본은 DB에 그대로 보존하지만 보고서 context에는 본인 활동, 본인이 참여한 스레드, 본인 멘션,
+본인 메시지의 반응, 본인이 포함된 DM·그룹 DM만 전달한다. 타인의 일반 채널 대화는 제외하고
+`actor_is_self=false` 활동은 협업 문맥으로만 해석한다.
 
 Report Agent 업데이트:
 
@@ -556,6 +572,8 @@ GET  /v1/reports/overall/2026-04-01_to_2026-08-05/work_report
 ```
 
 일간 period는 `YYYY-MM-DD`, 주간 period는 `YYYY-Www`, 월간 period는 `YYYY-MM` 형식이다.
+context 응답의 `source_total_event_counts`는 DB 전체 건수, `source_event_counts`는 선별 후 모델에
+전달한 건수다. `omitted_activity_count`와 `selection_applied`로 Slack 문맥 선별 여부를 확인한다.
 
 ## 13. 데이터 구조와 보존
 
@@ -585,20 +603,22 @@ ls -lh /var/backups/work-history
 journalctl -u work-history-backup.service -n 100 --no-pager
 ```
 
-백업만 존재하는 것으로는 충분하지 않다. 운영 DB를 건드리지 않는 별도 DB로 복원 시험을 한다.
+백업 직후 운영 DB를 건드리지 않는 고정 테스트 DB `workhistory_restore_test`에 자동으로 실제 복원한다.
+dump 형식, Alembic 버전, 필수 테이블과 주요 테이블 조회를 검증하며 하나라도 실패하면
+`work-history-backup.service`가 실패한다.
 
 ```sh
-sudo -u postgres dropdb --if-exists workhistory_restore_test
-sudo -u postgres createdb --owner=workhistory workhistory_restore_test
-sudo -u workhistory pg_restore \
-  --dbname=workhistory_restore_test \
-  /var/backups/work-history/workhistory-YYYYMMDDTHHMMSSZ.dump
+systemctl start work-history-backup.service
+systemctl status work-history-backup.service --no-pager
 sudo -u postgres psql -d workhistory_restore_test -c '\\dt'
-sudo -u postgres dropdb workhistory_restore_test
 ```
 
 실제 복원은 서비스를 중지하고 현재 DB 백업을 하나 더 만든 뒤 수행해야 한다. 실제 운영 DB 삭제는 이
-문서의 복원 시험 명령에 포함하지 않는다. Proxmox guest backup도 별도 스토리지에 구성한다.
+문서의 복원 시험 명령에 포함하지 않는다. 현재 자동 백업은 같은 LXC 저장소에 있으므로 호스트·스토리지
+동시 장애에는 취약하다. 중요도가 높아지면 Proxmox guest backup을 별도 물리 스토리지에 구성한다.
+
+생성 보고서는 수집 기록을 해석한 2차 문서다. 업무 증빙으로 사용할 때는 보고서만 제시하지 말고
+원본 Jira·Confluence·GitLab·Slack 링크, 발생 시각과 저장된 버전을 함께 제시한다.
 
 ## 15. 업데이트
 

@@ -20,6 +20,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   curl \
+  nftables \
   postgresql \
   postgresql-client \
   python3 \
@@ -54,7 +55,7 @@ tar -C "$SOURCE_DIR" \
   --exclude=.pytest_cache \
   --exclude='*.egg-info' \
   --exclude='__pycache__' \
-  -cf - . | tar -C "$SOURCE_COPY" -xf -
+  -cf - . | tar --no-overwrite-dir -C "$SOURCE_COPY" -xf -
 
 python3 -m venv "$APP_ROOT/venv"
 "$APP_ROOT/venv/bin/pip" install --upgrade pip
@@ -71,6 +72,14 @@ if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='
     --locale=C.utf8 \
     --template=template0 \
     workhistory
+fi
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='workhistory_restore_test'" | grep -q 1; then
+  runuser -u postgres -- createdb \
+    --owner=workhistory \
+    --encoding=UTF8 \
+    --locale=C.utf8 \
+    --template=template0 \
+    workhistory_restore_test
 fi
 
 if [ ! -f /etc/work-history/server.env ]; then
@@ -99,6 +108,8 @@ chmod 0600 /etc/work-history/credentials/read-api-token \
   /etc/work-history/credentials/slack-app-token
 
 install -o root -g root -m 0755 "$SOURCE_COPY/deploy/server/backup.sh" "$APP_ROOT/bin/backup.sh"
+install -o root -g root -m 0755 \
+  "$SOURCE_COPY/deploy/server/verify-backup.sh" "$APP_ROOT/bin/verify-backup.sh"
 for unit in "$SOURCE_COPY"/deploy/server/systemd/*; do
   install -o root -g root -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
 done

@@ -17,6 +17,7 @@ from work_history.models import (
     Artifact,
     GeneratedReport,
     GeneratedReportVersion,
+    SourceIdentity,
     SyncCursor,
     utcnow,
 )
@@ -234,6 +235,76 @@ def source_snapshot(session: Session, period_end_time: datetime) -> dict[str, An
     return result
 
 
+def _slack_thread_key(event: ActivityEvent) -> tuple[str, str] | None:
+    channel_id = str((event.changes or {}).get("channel_id") or "")
+    thread_ts = str((event.changes or {}).get("thread_ts") or "")
+    if not channel_id:
+        return None
+    if not thread_ts and event.artifact_remote_id:
+        parts = event.artifact_remote_id.rsplit(":", 2)
+        if len(parts) == 3 and parts[1] == channel_id:
+            thread_ts = parts[2]
+    return (channel_id, thread_ts) if thread_ts else None
+
+
+def _select_report_events(
+    event_models: list[ActivityEvent],
+    artifact_bodies: dict[str, str],
+    slack_self_ids: set[str],
+    maximum: int = MAX_EVENTS,
+) -> tuple[list[ActivityEvent], bool]:
+    self_artifacts = {
+        event.artifact_remote_id
+        for event in event_models
+        if event.source == "slack" and event.actor_is_self and event.artifact_remote_id
+    }
+    self_threads = {
+        key
+        for event in event_models
+        if event.source == "slack" and event.actor_is_self
+        if (key := _slack_thread_key(event)) is not None
+    }
+    mention_tokens = tuple(f"<@{remote_id}>" for remote_id in slack_self_ids)
+
+    prioritized: list[tuple[int, ActivityEvent]] = []
+    for event in event_models:
+        if event.source != "slack":
+            prioritized.append((0, event))
+            continue
+        if event.actor_is_self:
+            prioritized.append((1, event))
+            continue
+
+        thread_key = _slack_thread_key(event)
+        if thread_key is not None and thread_key in self_threads:
+            prioritized.append((2, event))
+            continue
+
+        body = artifact_bodies.get(event.artifact_remote_id or "", "")
+        if mention_tokens and any(token in body for token in mention_tokens):
+            prioritized.append((3, event))
+            continue
+
+        if event.kind == "slack_reaction" and event.artifact_remote_id in self_artifacts:
+            prioritized.append((4, event))
+            continue
+
+        if (event.changes or {}).get("conversation_type") in {"im", "mpim"}:
+            prioritized.append((5, event))
+
+    over_limit = len(prioritized) > maximum
+    if over_limit:
+        prioritized = sorted(
+            prioritized,
+            key=lambda item: (item[0], item[1].occurred_at, item[1].id),
+        )[:maximum]
+    selected = sorted(
+        (event for _, event in prioritized),
+        key=lambda event: (event.occurred_at, event.id),
+    )
+    return selected, over_limit
+
+
 def build_report_context(
     session: Session,
     cadence: ReportCadence,
@@ -243,16 +314,43 @@ def build_report_context(
     from_time, to_time = period_datetimes(cadence, period)
     redactor = ContextRedactor()
 
-    event_models = session.scalars(
+    all_event_models = session.scalars(
         select(ActivityEvent)
         .where(ActivityEvent.occurred_at >= from_time, ActivityEvent.occurred_at < to_time)
         .order_by(ActivityEvent.occurred_at.asc(), ActivityEvent.id.asc())
-        .limit(MAX_EVENTS + 1)
     ).all()
-    if len(event_models) > MAX_EVENTS:
-        event_models = event_models[:MAX_EVENTS]
+
+    slack_artifact_ids = {
+        item.artifact_id
+        for item in all_event_models
+        if item.source == "slack" and item.artifact_id
+    }
+    artifact_bodies: dict[str, str] = {}
+    if slack_artifact_ids:
+        slack_artifacts = session.scalars(
+            select(Artifact).where(Artifact.id.in_(slack_artifact_ids))
+        ).all()
+        artifact_bodies = {
+            item.remote_id: item.body_text or ""
+            for item in slack_artifacts
+        }
+    slack_self_ids = set(
+        session.scalars(
+            select(SourceIdentity.remote_id).where(
+                SourceIdentity.source == "slack",
+                SourceIdentity.is_self.is_(True),
+            )
+        ).all()
+    )
+    event_models, over_limit = _select_report_events(
+        all_event_models,
+        artifact_bodies,
+        slack_self_ids,
+    )
+    if over_limit:
         redactor.truncated = True
 
+    total_event_counts = Counter(item.source for item in all_event_models)
     event_counts = Counter(item.source for item in event_models)
     artifact_ids = {item.artifact_id for item in event_models if item.artifact_id}
     artifact_models = []
@@ -366,6 +464,11 @@ def build_report_context(
         "to_time": to_time,
         "activity_count": len(event_models),
         "source_event_counts": {source: event_counts.get(source, 0) for source in SOURCES},
+        "source_total_event_counts": {
+            source: total_event_counts.get(source, 0) for source in SOURCES
+        },
+        "omitted_activity_count": len(all_event_models) - len(event_models),
+        "selection_applied": total_event_counts.get("slack", 0) > 0,
         "activities": activities,
         "artifacts": artifacts,
         "daily_documents": daily_documents,

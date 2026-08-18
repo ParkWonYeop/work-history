@@ -2,6 +2,7 @@
 set -eu
 
 BACKUP_DIR=/var/backups/work-history
+VERIFY_SCRIPT=/opt/work-history/bin/verify-backup.sh
 case "$BACKUP_DIR" in
   /var/backups/work-history) ;;
   *) echo "Unexpected backup directory" >&2; exit 1 ;;
@@ -18,4 +19,9 @@ PART="$BACKUP_DIR/workhistory-$STAMP.dump.part"
 FINAL="$BACKUP_DIR/workhistory-$STAMP.dump"
 pg_dump --format=custom --file="$PART" workhistory
 mv "$PART" "$FINAL"
+if [ ! -x "$VERIFY_SCRIPT" ]; then
+  echo "Backup verification script is missing" >&2
+  exit 1
+fi
+"$VERIFY_SCRIPT" "$FINAL"
 find "$BACKUP_DIR" -xdev -type f -name 'workhistory-*.dump' -mtime +13 -delete

@@ -1,7 +1,8 @@
 # Work-history daily report automation
 
-Use only the signed `.venv/bin/work-history-report-agent` client with its default config. Never print, read, or request its
-Keychain signing key. Store temporary context and Markdown only below `.report-tmp`, set files
+Use only the signed `/Users/you/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-report-agent`
+client with the explicit config `/Users/you/Library/Application Support/WorkHistoryReportAgent/config.toml`. Never print,
+read, or request its Keychain signing key. Store temporary context and Markdown only below `.report-tmp`, set files
 to mode 600, and remove them after a confirmed upload.
 Before cleanup, verify `.report-tmp` is a real directory and not a symbolic link. Remove only the
 exact files created by the current run; never use a wildcard or recursive deletion.
@@ -9,7 +10,7 @@ exact files created by the current run; never use a wildcard or recursive deleti
 All dates use `Asia/Seoul`. On every run:
 
 1. Determine yesterday's calendar date.
-2. Ask the agent for missing or changed-partial daily periods from `2026-04-01` through
+2. Ask the agent for missing or changed-partial daily periods from `2026-08-17` through
    yesterday. Process yesterday first, then up to two older periods.
 3. Fetch each period's daily context. If `activity_count` is zero, use `upload-empty`.
 4. Otherwise create and upload two substantial Korean Markdown documents. Write in complete,
@@ -78,7 +79,8 @@ All dates use `Asia/Seoul`. On every run:
 6. Upload with prompt version `work-history-report-v2` and model `gpt-5.6-sol`. The client
    decides `partial` versus `final` from source freshness.
 7. On the first calendar day of a month, after the previous day is stored, process the previous
-   month's missing or changed-partial monthly period. Apply the same detailed structure at monthly
+   month's missing or changed-partial monthly period, considering only months from `2026-08`
+   onward. Apply the same detailed structure at monthly
    scale. The monthly work report must synthesize the month's overall direction, workstreams,
    significant deliverables, decisions and trade-offs, verified impact, collaboration, unresolved
    risks, and carry-over work, supported by stored daily documents and source evidence. The monthly
@@ -87,7 +89,7 @@ All dates use `Asia/Seoul`. On every run:
    with priorities, routines, experiments, and success signals.
 8. On every Monday, after the previous day's daily documents are stored, process the previous
    completed Monday-through-Sunday ISO week. Ask for missing or changed-partial weekly periods from
-   the ISO week containing `2026-04-01` through the previous Sunday. Process the immediately
+   the ISO week containing `2026-08-17` through the previous Sunday. Process the immediately
    preceding week first, then up to two older periods so an interrupted backlog catches up without
    delaying the daily report indefinitely. Weekly period keys use `YYYY-Www`, for example
    `2026-W14`.
