@@ -64,6 +64,36 @@ def test_empty_windows_have_checkpoint_specific_idempotency_keys() -> None:
     assert second.next_checkpoint == second_checkpoint
 
 
+def test_replay_batches_never_advance_checkpoint_and_are_window_scoped() -> None:
+    normalized = NormalizedBatch()
+    first = _split_batch(
+        normalized,
+        "work-mac",
+        "https://gitlab.internal",
+        None,
+        batch_scope="replay:2026-04-01:2026-04-08",
+    )[0]
+    retry = _split_batch(
+        normalized,
+        "work-mac",
+        "https://gitlab.internal",
+        None,
+        batch_scope="replay:2026-04-01:2026-04-08",
+    )[0]
+    following = _split_batch(
+        normalized,
+        "work-mac",
+        "https://gitlab.internal",
+        None,
+        batch_scope="replay:2026-04-08:2026-04-15",
+    )[0]
+
+    assert first.batch_id == retry.batch_id
+    assert first.batch_id != following.batch_id
+    assert first.next_checkpoint is None
+    assert following.next_checkpoint is None
+
+
 def test_scheduled_run_retries_until_success_and_catches_up_backlog() -> None:
     monday_morning = datetime(2026, 8, 3, 0, 0, tzinfo=UTC)  # 09:00 Asia/Seoul
     yesterday = datetime(2026, 8, 2, 0, 0, tzinfo=UTC)

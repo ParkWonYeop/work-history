@@ -456,6 +456,19 @@ deploy/macos/update-agent.sh
   set-token
 ```
 
+서버 체크포인트를 후퇴시키지 않고 특정 기간을 다시 조회하려면 `replay`를 사용한다. 이미 저장된 레코드는
+멱등 처리되고 누락된 레코드만 추가되며, 원본 JSON의 180일 만료 시각도 다시 수집한 시각 기준으로
+갱신된다.
+
+```sh
+"$HOME/Library/Application Support/WorkHistoryAgent/venv/bin/work-history-agent" \
+  --config "$HOME/Library/Application Support/WorkHistoryAgent/config.toml" \
+  replay \
+  --from '2026-04-01T00:00:00+09:00' \
+  --to '2026-08-18T11:08:00+09:00' \
+  --chunk-days 7
+```
+
 ## 11. Codex Report Agent와 보고서 자동화
 
 Mac에서 Report Agent를 설치한다.

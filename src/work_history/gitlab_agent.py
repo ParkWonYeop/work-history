@@ -183,8 +183,9 @@ def _split_batch(
     normalized: NormalizedBatch,
     device_id: str,
     source_instance: str,
-    checkpoint: dict[str, Any],
+    checkpoint: dict[str, Any] | None,
     batch_size: int = 400,
+    batch_scope: str | None = None,
 ) -> list[GitLabIngestBatch]:
     records: list[tuple[str, Any]] = []
     for collection in RECORD_COLLECTIONS:
@@ -212,6 +213,7 @@ def _split_batch(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
                 f"{device_id}:{source_instance}:{index}:"
+                f"{batch_scope or ''}:"
                 f"{json.dumps(checkpoint, sort_keys=True, separators=(',', ':'))}:"
                 f"{fingerprint}",
             )
@@ -226,6 +228,66 @@ def _split_batch(
             )
         )
     return output
+
+
+def replay_agent(
+    config_path: Path,
+    start: datetime,
+    end: datetime,
+    *,
+    chunk_days: int = 7,
+) -> int:
+    if start.tzinfo is None or end.tzinfo is None:
+        raise RuntimeError("replay timestamps must include timezone offsets")
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    if end <= start:
+        raise RuntimeError("replay end must be after start")
+    if not 1 <= chunk_days <= 31:
+        raise RuntimeError("replay chunk-days must be between 1 and 31")
+
+    config = _load_config(config_path)
+    device_id = str(config["device_id"])
+    server = SignedServerClient(
+        str(config["server_url"]),
+        device_id,
+        _private_key(device_id),
+    )
+    gitlab = GitLabCollector(str(config["gitlab_url"]), _secret(device_id, "gitlab-pat"))
+    try:
+        gitlab.check_connection()
+        window_start = start
+        windows = 0
+        accepted = 0
+        while window_start < end:
+            window_end = min(window_start + timedelta(days=chunk_days), end)
+            logger.info("Replaying GitLab activity from %s to %s", window_start, window_end)
+            normalized = gitlab.collect(window_start, window_end)
+            batches = _split_batch(
+                normalized,
+                device_id,
+                str(config["gitlab_url"]),
+                None,
+                batch_scope=f"replay:{window_start.isoformat()}:{window_end.isoformat()}",
+            )
+            for batch in batches:
+                response = server.upload(batch)
+                if response.get("checkpoint_updated"):
+                    raise RuntimeError("replay unexpectedly changed the server checkpoint")
+                accepted += int(response.get("accepted", 0))
+            windows += 1
+            logger.info(
+                "GitLab replay window completed; accepted=%s batches=%s window=%s",
+                accepted,
+                len(batches),
+                windows,
+            )
+            window_start = window_end
+        logger.info("GitLab replay completed; windows=%s accepted=%s", windows, accepted)
+        return 0
+    finally:
+        gitlab.close()
+        server.close()
 
 
 def run_agent(
@@ -386,6 +448,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run")
     sub.add_parser("catch-up")
     sub.add_parser("scheduled-run")
+    replay_parser = sub.add_parser("replay")
+    replay_parser.add_argument("--from", dest="from_time", required=True)
+    replay_parser.add_argument("--to", dest="to_time")
+    replay_parser.add_argument("--chunk-days", type=int, default=7)
     sub.add_parser("set-token")
     history_parser = sub.add_parser("set-history-start")
     history_parser.add_argument("--history-start", required=True)
@@ -414,6 +480,21 @@ def main() -> None:
             raise SystemExit(run_agent(args.config, catch_up=True))
         elif args.command == "scheduled-run":
             raise SystemExit(run_agent(args.config, scheduled=True, catch_up=True))
+        elif args.command == "replay":
+            start = datetime.fromisoformat(args.from_time.replace("Z", "+00:00"))
+            end = (
+                datetime.fromisoformat(args.to_time.replace("Z", "+00:00"))
+                if args.to_time
+                else datetime.now(UTC)
+            )
+            raise SystemExit(
+                replay_agent(
+                    args.config,
+                    start,
+                    end,
+                    chunk_days=args.chunk_days,
+                )
+            )
         elif args.command == "set-token":
             set_token(args.config)
         elif args.command == "set-history-start":
