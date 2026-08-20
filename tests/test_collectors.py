@@ -413,17 +413,30 @@ def test_gitlab_collector_supplements_events_with_mrs_and_commits() -> None:
         if path == "/api/v4/user/emails":
             return httpx.Response(200, json=[{"email": "me@example.com"}])
         if path == "/api/v4/users/7/events":
+            assert "scope" not in request.url.params
             return httpx.Response(
                 200,
                 json=[
                     {
                         "id": 1,
+                        "author_id": 7,
                         "project_id": 1,
                         "action_name": "pushed to",
                         "target_type": None,
                         "created_at": NOW.isoformat(),
                         "push_data": {"commit_title": "Implement collector"},
-                    }
+                    },
+                    {
+                        "id": 2,
+                        "author_id": 8,
+                        "author": {"id": 8, "name": "Another User"},
+                        "project_id": 1,
+                        "action_name": "approved",
+                        "target_type": "MergeRequest",
+                        "target_iid": 2,
+                        "target_title": "Improve collector",
+                        "created_at": NOW.isoformat(),
+                    },
                 ],
             )
         if path == "/api/v4/merge_requests":
@@ -450,4 +463,9 @@ def test_gitlab_collector_supplements_events_with_mrs_and_commits() -> None:
     assert any(artifact.kind == "merge_request" for artifact in batch.artifacts)
     assert any(artifact.kind == "commit" for artifact in batch.artifacts)
     assert any(event.action == "committed" for event in batch.events)
-    assert any(event.event_key == "event:1" for event in batch.events)
+    own_event = next(event for event in batch.events if event.event_key == "event:1")
+    assert own_event.actor_remote_id == "7"
+    assert own_event.actor_is_self
+    foreign_event = next(event for event in batch.events if event.event_key == "event:2")
+    assert foreign_event.actor_remote_id == "8"
+    assert not foreign_event.actor_is_self

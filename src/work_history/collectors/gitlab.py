@@ -107,13 +107,16 @@ class GitLabCollector:
         params = {
             "after": start.strftime("%Y-%m-%d"),
             "before": (end + timedelta(days=1)).date().isoformat(),
-            "scope": "all",
             "sort": "asc",
         }
         for event in self._paginate(f"/api/v4/users/{user_id}/events", params):
             occurred_at = parse_datetime(event.get("created_at"))
             if not in_window(occurred_at, start, end):
                 continue
+            author_id = event.get("author_id")
+            if author_id is None:
+                author_id = (event.get("author") or {}).get("id")
+            actor_remote_id = str(author_id) if author_id is not None else None
             project_id = event.get("project_id")
             if project_id:
                 project_ids.add(int(project_id))
@@ -131,7 +134,8 @@ class GitLabCollector:
                     kind=target_type,
                     action=event.get("action_name") or "activity",
                     occurred_at=occurred_at,
-                    actor_remote_id=user_id,
+                    actor_remote_id=actor_remote_id,
+                    actor_is_self=actor_remote_id == user_id,
                     artifact_remote_id=artifact_remote_id,
                     title=event.get("target_title")
                     or event.get("push_data", {}).get("commit_title")
