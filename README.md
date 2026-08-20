@@ -693,6 +693,24 @@ R2 장애, 암호화 실패, 로컬·원격 해시 불일치가 하나라도 있
 아카이브된다. 매일 03:30 KST에는 만료 7일 전 원본을 아카이브하고, 매주 일요일 05:00 KST에는 모든
 로컬·R2 암호문을 다시 읽어 SHA-256을 검증한다.
 
+### 14.4 잘못 아카이브한 원본 교체
+
+R2의 무기한 Bucket Lock은 규칙을 제거할 수 있으므로 해제 불가능한 WORM 보관소는 아니다. 잠금
+해제 중에는 해당 prefix의 모든 객체가 삭제 가능해진다. 잘못된 원본을 정리할 때는 먼저 DB 백업과
+복원 시험을 완료하고 archive·verify·cleanup timer를 잠시 중지한다. Mac에서 기존 객체를 복호화한 뒤
+정확한 `source`, `record_key`, `collected_at`, `payload_sha256` 목록만 제외해 재포장한다.
+
+`deploy/macos/repack-archive.py`는 manifest, 전체 payload 해시와 제외 지문 일치 여부를 검증하면서
+정상 레코드만 새 JSONL로 만든다. 새 결과를 다시 zstd·age 처리한 뒤
+`deploy/server/archive-object-admin.py upload-new`로 존재하지 않는 새 키에 업로드한다. 이 서버 도구는
+객체 키가 설정된 prefix 안에 있는지 확인하고 암호문 크기와 SHA-256을 고정해 업로드·재다운로드한다.
+
+새 객체와 DB 원장의 전체 검증이 끝난 다음에만 Bucket Lock 규칙을 제거한다. 기존 객체 삭제에는
+`archive-object-admin.py delete-verified`와 기존 객체의 정확한 키·크기·SHA-256을 사용한다. 삭제 직후
+같은 이름, 같은 prefix, 무기한 보존으로 잠금 규칙을 다시 만들고 대시보드 새로고침으로 `사용됨`을
+확인한다. 마지막으로 기존 로컬 암호문과 원장 배치를 제거하고 전체 archive verify, DB 백업·복원 시험,
+중지했던 timer 재활성화를 수행한다. 교체 객체의 원격 검증 전에는 잠금을 해제하지 않는다.
+
 ## 15. 백업과 복원 시험
 
 매일 생성되는 PostgreSQL custom-format backup은 `/var/backups/work-history`에 저장되며 14일간
