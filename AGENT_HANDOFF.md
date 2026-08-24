@@ -208,4 +208,3 @@ R2 오염 객체를 교체할 때는 새 객체 업로드·원격 검증·DB 원
 - [ ] NPM, Cloudflare DNS/SSL 관리 권한
 - [ ] healthz 성공, backup 복원 성공, R2 verify 성공 확인
 - [ ] 변경 전 pytest -q, ruff check ., 셸 문법 검사 실행
-
