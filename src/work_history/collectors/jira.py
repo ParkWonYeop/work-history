@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -24,6 +25,17 @@ from work_history.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _jql_timezone(name: Any) -> tzinfo:
+    """Jira resolves bare JQL datetime literals in the account's timezone."""
+    if not name:
+        return UTC
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("Unknown Jira account timezone %r; falling back to UTC", name)
+        return UTC
 
 
 class JiraCollector:
@@ -57,7 +69,9 @@ class JiraCollector:
                 )
             ]
         )
-        keys = self._candidate_issue_keys(account_id, start, end)
+        keys = self._candidate_issue_keys(
+            account_id, start, end, _jql_timezone(myself.get("timeZone"))
+        )
         collected_at = datetime.now(UTC)
         for key in sorted(keys):
             try:
@@ -81,11 +95,17 @@ class JiraCollector:
         account_id: str,
         start: datetime,
         end: datetime,
+        jql_tz: tzinfo,
     ) -> set[str]:
-        start_day = start.strftime("%Y-%m-%d")
-        end_day = end.strftime("%Y-%m-%d")
-        start_minute = start.strftime("%Y-%m-%d %H:%M")
-        end_minute = end.strftime("%Y-%m-%d %H:%M")
+        # JQL datetime literals carry no offset, so Jira reads them in the account's
+        # timezone. Emitting UTC values here shifts the whole window and silently drops
+        # the most recent hours of activity.
+        local_start = start.astimezone(jql_tz)
+        local_end = end.astimezone(jql_tz)
+        start_day = local_start.strftime("%Y-%m-%d")
+        end_day = local_end.strftime("%Y-%m-%d")
+        start_minute = local_start.strftime("%Y-%m-%d %H:%M")
+        end_minute = local_end.strftime("%Y-%m-%d %H:%M")
         queries = [
             (
                 f'issuekey in updatedBy("{account_id}", "{start_day}", "{end_day}") '

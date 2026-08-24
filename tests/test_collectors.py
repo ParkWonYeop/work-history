@@ -469,3 +469,42 @@ def test_gitlab_collector_supplements_events_with_mrs_and_commits() -> None:
     foreign_event = next(event for event in batch.events if event.event_key == "event:2")
     assert foreign_event.actor_remote_id == "8"
     assert not foreign_event.actor_is_self
+
+
+def test_jira_candidate_jql_uses_account_timezone() -> None:
+    """JQL datetime literals have no offset, so they must be rendered in the
+    account's timezone. Emitting UTC shifted the window and dropped recent issues."""
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/rest/api/3/myself":
+            return httpx.Response(
+                200,
+                json={"accountId": "me", "displayName": "Me", "timeZone": "Asia/Seoul"},
+            )
+        if path == "/rest/api/3/search/jql":
+            import json as _json
+
+            captured.append(_json.loads(request.content)["jql"])
+            return httpx.Response(200, json={"issues": [], "isLast": True})
+        return httpx.Response(404)
+
+    collector = JiraCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        # 23:00Z -> 08:00 KST (next day), 02:00Z -> 11:00 KST
+        collector.collect(
+            datetime(2026, 8, 4, 23, 0, tzinfo=UTC),
+            datetime(2026, 8, 5, 2, 0, tzinfo=UTC),
+        )
+    finally:
+        collector.close()
+
+    joined = " | ".join(captured)
+    assert "2026-08-05 08:00" in joined, joined
+    assert "2026-08-05 11:00" in joined, joined
+    # the raw UTC rendering must not leak into the query
+    assert "2026-08-04 23:00" not in joined, joined
+    assert "2026-08-05 02:00" not in joined, joined
