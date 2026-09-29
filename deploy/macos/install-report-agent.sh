@@ -34,7 +34,7 @@ mkdir -p "$APP_DIR"
 chmod 700 "$APP_DIR"
 "$PYTHON_BIN" -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip
-"$APP_DIR/venv/bin/pip" install -c "$SOURCE_DIR/constraints.txt" "$SOURCE_DIR"
+"$APP_DIR/venv/bin/pip" install -c "$SOURCE_DIR/constraints.txt" "$SOURCE_DIR[mcp]"
 "$APP_DIR/venv/bin/work-history-report-agent" --config "$CONFIG_PATH" init \
   --server-url "$1" --device-id "$DEVICE_ID"
 

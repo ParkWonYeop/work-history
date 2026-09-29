@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+  "mcp>=2.2,<3",
+]
 dev = [
   "httpx2>=2.9,<3",
   "pytest>=8.3,<10",
@@ -34,6 +37,7 @@ dev = [
 [project.scripts]
 work-history = "work_history.cli:main"
 work-history-agent = "work_history.gitlab_agent:main"
+work-history-mcp = "work_history.mcp_server:main"
 work-history-report-agent = "work_history.report_agent:main"
 
 [tool.hatch.build.targets.wheel]

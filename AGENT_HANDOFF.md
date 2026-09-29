@@ -49,6 +49,7 @@
 | R2 Secret Access Key | /etc/work-history/credentials/r2-secret-access-key | archive/verify, DB 외부 백업 |
 | Mac GitLab PAT·장치 개인키 | macOS Keychain | GitLab 에이전트 |
 | Report Agent 개인키 | Keychain service com.workhistory.report-agent | 보고서 서명 |
+| MCP 읽기 토큰 사본 | Keychain service com.workhistory.report-agent, account codex-report-agent:read-api-token | work-history-mcp 조회 |
 | age 개인키 | Keychain service com.workhistory.raw-archive + 비밀번호 관리자 복구본 | 원본 복호화 |
 
 실제 값은 문서에 넣지 않는다. LXC에서 읽기 토큰이 정말 필요한 프로세스는 다음 명령을 직접 실행한다.
@@ -175,6 +176,7 @@ PostgreSQL은 Unix socket/localhost 전용으로 유지한다. 공유기 SSH 포
     deploy/macos/update-report-agent.sh
 
 자동화 프롬프트: deploy/macos/report-automation-prompt.md.
+대화형 조회·작성용 로컬 MCP 서버: 같은 venv의 work-history-mcp (README 11A).
 모델: gpt-5.6-sol, reasoning: high.
 
 ## 11. 백필·아카이브 복구

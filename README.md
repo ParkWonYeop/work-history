@@ -58,6 +58,7 @@ src/work_history/                 애플리케이션 소스
   collectors/                    Jira·Confluence·GitLab·Slack REST 수집기
   gitlab_agent.py                macOS GitLab 수집·재개 에이전트
   report_agent.py                Codex용 서명 보고서 클라이언트
+  mcp_server.py                  LLM 클라이언트용 로컬 stdio MCP 서버
   models.py                      SQLAlchemy 데이터 모델
   reports.py                     보고서 문맥·상태·버전 처리
   raw_archive.py                 결정적 JSONL·압축·암호화·R2 검증
@@ -548,6 +549,39 @@ Report Agent 업데이트:
 deploy/macos/update-report-agent.sh
 ```
 
+### 11A. MCP 서버 (대화형 조회·보고서 작성)
+
+Claude Code, Codex 같은 MCP 클라이언트에서 업무 이력을 조회하고 보고서를 쓰기 위한 로컬 stdio
+서버다. Report Agent venv에 함께 설치되고 네트워크 포트를 열지 않는다. 보고서 문맥·누락 기간·저장은
+Report Agent 장치 서명키를, 활동·업무 대상·저장된 보고서 조회는 Keychain의 읽기 토큰을 쓴다.
+
+```sh
+deploy/macos/update-report-agent.sh          # 기존 설치에 [mcp] extra 추가
+MCP="$HOME/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-mcp"
+"$MCP" set-read-token                        # LXC show-read-token.sh 값을 붙여 넣음
+claude mcp add --scope user work-history -- "$MCP"
+```
+
+Codex는 `~/.codex/config.toml`에 등록한다.
+
+```toml
+[mcp_servers.work-history]
+command = "/Users/you/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-mcp"
+```
+
+| 도구 | 쓰기 | 용도 |
+|---|---|---|
+| `get_report_context` | 아니오 | 기간별 요약(`summary`)과 활동·업무 대상·일일 문서 페이지 |
+| `list_missing_reports` | 아니오 | 보고서가 없거나 갱신이 필요한 기간 |
+| `search_activities` | 아니오 | 서울 날짜 기준 최대 93일 활동 검색(검색어·본인 활동 필터) |
+| `get_artifact` | 아니오 | 이슈·문서·MR·커밋·메시지 본문과 최근 버전 |
+| `get_report` | 아니오 | 저장된 보고서 Markdown과 revision |
+| `put_report` | 예 | 보고서 저장. 상태와 source snapshot은 마지막으로 조회한 문맥에서 정함 |
+
+응답은 한 번에 약 6만 자로 나뉘며 `next_offset`으로 이어서 읽는다. 문맥은 기간별로 캐시되므로 새
+수집분을 반영하려면 `refresh=true`를 준다. `put_report`는 `prompt_version=work-history-mcp-v1`로 저장되고
+모든 변경은 새 revision으로 남는다. 매일 11:00 자동화는 기존 CLI를 그대로 쓴다.
+
 ## 12. API
 
 ### 공개 상태 확인
@@ -866,7 +900,7 @@ Python 3.11 이상이 필요하다.
 
 ```sh
 python3.11 -m venv .venv
-.venv/bin/pip install -c constraints.txt -e '.[dev]'
+.venv/bin/pip install -c constraints.txt -e '.[dev,mcp]'
 .venv/bin/pytest
 .venv/bin/ruff check .
 ```
@@ -883,7 +917,7 @@ export READ_API_TOKEN='development-only-token'
 개발 토큰은 운영에 사용하지 않는다. `.env`, DB, report export, Keychain 값은 Git에 추가하지 않는다.
 
 설치 스크립트는 `constraints.txt`의 검증된 버전으로 설치한다. `pyproject.toml`의 의존성을 바꾸면 새
-venv에서 `pip install '.[dev]'` 후 `pip freeze --exclude work-history`로 파일을 다시 만들고 테스트한다.
+venv에서 `pip install '.[dev,mcp]'` 후 `pip freeze --exclude work-history`로 파일을 다시 만들고 테스트한다.
 
 ## 19. 운영 전 최종 점검
 
