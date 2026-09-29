@@ -18,6 +18,7 @@ from work_history.raw_archive import (
     RawSnapshot,
     encrypt_snapshots,
     payload_sha256,
+    upload_db_backup,
 )
 from work_history.services import cleanup_expired
 
@@ -57,6 +58,12 @@ class FakeStore:
         data = self.objects[object_key]
         assert hashlib.sha256(data).hexdigest() == expected_sha256
         assert len(data) == expected_size
+
+    def list_objects(self, prefix: str = "") -> dict[str, int]:
+        return {key: len(data) for key, data in self.objects.items() if key.startswith(prefix)}
+
+    def delete_object(self, object_key: str) -> None:
+        del self.objects[object_key]
 
     def fetch_verified(
         self,
@@ -358,3 +365,124 @@ def test_local_corruption_is_detected_before_remote_verification(
         Path(batch.local_path).write_bytes(b"corrupted")
     with pytest.raises(RuntimeError, match="local archive size mismatch"):
         manager.verify_all()
+
+
+def _expired_record(key: str, now: datetime) -> RawRecord:
+    return RawRecord(
+        source="jira",
+        record_key=key,
+        kind="issue",
+        payload={"value": key},
+        collected_at=now - timedelta(days=181),
+        expires_at=now - timedelta(days=1),
+    )
+
+
+def test_cleanup_deletes_in_batches_and_keeps_unarchived_records(
+    settings, session_factory, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("work_history.raw_archive.encrypt_snapshots", _fake_encrypt)
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.add_all([_expired_record(f"archived-{index}", now) for index in range(3)])
+        session.commit()
+    manager = RawArchiveManager(_archive_settings(settings, tmp_path), session_factory, FakeStore())
+    assert manager.archive_pending() == {"batches": 1, "records": 3}
+    with session_factory() as session:
+        session.add(_expired_record("unarchived", now))
+        session.commit()
+
+    with session_factory() as session:
+        result = cleanup_expired(session, batch_size=2)
+    assert result == {"raw_records": 3, "unarchived_raw_records": 1, "nonces": 0}
+    with session_factory() as session:
+        assert session.scalars(select(RawRecord.record_key)).all() == ["unarchived"]
+
+
+def test_inventory_compares_the_bucket_listing_with_the_ledger(
+    settings, session_factory, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("work_history.raw_archive.encrypt_snapshots", _fake_encrypt)
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.add_all([_expired_record(f"record-{index}", now) for index in range(2)])
+        session.commit()
+    store = FakeStore()
+    manager = RawArchiveManager(
+        _archive_settings(settings, tmp_path, batch_size=1), session_factory, store
+    )
+    manager.archive_pending()
+    verified_keys = sorted(store.objects)
+    total = sum(len(data) for data in store.objects.values())
+    assert manager.inventory() == {
+        "objects": 2,
+        "bytes": total,
+        "raw_objects": 2,
+        "raw_bytes": total,
+        "db_verified_batches": 2,
+        "db_verified_bytes": total,
+        "missing_verified_objects": 0,
+        "size_mismatches": 0,
+        "untracked_raw_objects": 0,
+    }
+
+    store.objects["raw/v1/stray.jsonl.zst.age"] = b"x"
+    store.objects["db/v1/2026/09/workhistory-20260901T023000Z.dump.age"] = b"yy"
+    del store.objects[verified_keys[0]]
+    store.objects[verified_keys[1]] += b"!"
+    inventory = manager.inventory()
+    assert inventory["objects"] == 3
+    assert inventory["raw_objects"] == 2
+    assert inventory["missing_verified_objects"] == 1
+    assert inventory["size_mismatches"] == 1
+    assert inventory["untracked_raw_objects"] == 1
+
+
+@pytest.mark.skipif(
+    shutil.which("age-keygen") is None or shutil.which("age") is None,
+    reason="age is required for the database backup round trip",
+)
+def test_db_backup_is_encrypted_uploaded_and_old_copies_are_pruned(settings, tmp_path) -> None:
+    identity = tmp_path / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True, capture_output=True)
+    recipient = subprocess.run(
+        ["age-keygen", "-y", str(identity)], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    dump = backup_dir / "workhistory-20260929T023000Z.dump"
+    dump.write_bytes(b"PGDMP custom dump bytes")
+    store = FakeStore()
+    old_keys = [
+        "db/v1/2026/07/workhistory-20260701T023000Z.dump.age",
+        "db/v1/2026/08/workhistory-20260801T023000Z.dump.age",
+        "db/v1/2026/09/workhistory-20260901T023000Z.dump.age",
+    ]
+    for key in old_keys:
+        store.objects[key] = b"old"
+    store.objects["db/v1/README.txt"] = b"not a backup"
+
+    result = upload_db_backup(
+        replace(_archive_settings(settings, tmp_path), raw_archive_age_recipient=recipient),
+        store,
+        dump,
+        keep=2,
+    )
+
+    assert result["pruned"] == 2
+    assert result["prune_errors"] == 0
+    assert set(store.objects) == {old_keys[2], result["object_key"], "db/v1/README.txt"}
+    assert sorted(path.name for path in backup_dir.iterdir()) == [dump.name]
+    encrypted = tmp_path / "downloaded.age"
+    encrypted.write_bytes(store.objects[result["object_key"]])
+    decrypted = subprocess.run(
+        ["age", "-d", "-i", str(identity), str(encrypted)], check=True, capture_output=True
+    ).stdout
+    assert decrypted == dump.read_bytes()
+
+
+def test_db_backup_refuses_unexpected_file_names(settings, tmp_path) -> None:
+    other = tmp_path / "notes.txt"
+    other.write_text("secret")
+    with pytest.raises(RuntimeError, match="unexpected database dump name"):
+        upload_db_backup(_archive_settings(settings, tmp_path), FakeStore(), other)

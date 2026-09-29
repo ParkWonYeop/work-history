@@ -20,6 +20,11 @@ from work_history.models import (
 )
 from work_history.schemas import GitLabIngestBatch, NormalizedBatch
 
+
+class BatchConflictError(ValueError):
+    """A batch_id was reused with different content."""
+
+
 _CONTENT_KEYS = {
     "body",
     "body_text",
@@ -315,7 +320,7 @@ def ingest_gitlab_batch(
     existing = session.get(IngestBatch, batch.batch_id)
     if existing:
         if existing.body_hash != body_hash or existing.device_id != device_id:
-            raise ValueError("batch_id was already used with different content")
+            raise BatchConflictError("batch_id was already used with different content")
         return {
             "batch_id": batch.batch_id,
             "accepted": 0,
@@ -372,22 +377,40 @@ def remember_nonce(
     return True
 
 
-def cleanup_expired(session: Session) -> dict[str, int]:
+def cleanup_expired(session: Session, batch_size: int = 500) -> dict[str, int]:
+    """Delete expired raw records whose exact snapshot is in a verified archive.
+
+    Commits per batch so a cohort that expires on the same day never has to fit in memory.
+    """
     from work_history.raw_archive import RawSnapshot, verified_fingerprints
 
     now = utcnow()
-    expired = list(session.scalars(select(RawRecord).where(RawRecord.expires_at < now)))
-    snapshots = [RawSnapshot.from_model(record) for record in expired]
-    verified = verified_fingerprints(session, snapshots)
     archived_raw_records = 0
     retained_raw_records = 0
-    for record, snapshot in zip(expired, snapshots, strict=True):
-        if snapshot.fingerprint in verified:
-            session.delete(record)
-            archived_raw_records += 1
-        else:
-            retained_raw_records += 1
+    last_id = ""
+    while True:
+        expired = list(
+            session.scalars(
+                select(RawRecord)
+                .where(RawRecord.expires_at < now, RawRecord.id > last_id)
+                .order_by(RawRecord.id)
+                .limit(batch_size)
+            )
+        )
+        if not expired:
+            break
+        last_id = expired[-1].id
+        snapshots = [RawSnapshot.from_model(record) for record in expired]
+        verified = verified_fingerprints(session, snapshots)
+        for record, snapshot in zip(expired, snapshots, strict=True):
+            if snapshot.fingerprint in verified:
+                session.delete(record)
+                archived_raw_records += 1
+            else:
+                retained_raw_records += 1
+        session.commit()
     nonce_result = session.execute(delete(IngestNonce).where(IngestNonce.expires_at < now))
+    session.commit()
     return {
         "raw_records": archived_raw_records,
         "unarchived_raw_records": retained_raw_records,
@@ -412,3 +435,62 @@ def finish_sync_run(
     run.finished_at = datetime.now(UTC)
     run.counters = counters or {}
     run.error = error
+
+
+def latest_run(
+    session: Session,
+    source: str,
+    job_kind: str | None = None,
+    status: str | None = None,
+) -> SyncRun | None:
+    query = select(SyncRun).where(SyncRun.source == source)
+    if job_kind is not None:
+        query = query.where(SyncRun.job_kind == job_kind)
+    if status is not None:
+        query = query.where(SyncRun.status == status)
+    return session.scalar(query.order_by(SyncRun.started_at.desc()).limit(1))
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def job_status(
+    session: Session,
+    source: str,
+    job_kind: str,
+    unit: str,
+    max_age: timedelta,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Summarize a scheduled job from its own runs and its systemd OnFailure records."""
+    now = now or datetime.now(UTC)
+    last = latest_run(session, source, job_kind)
+    success = latest_run(session, source, job_kind, "success")
+    unit_failure = latest_run(session, "systemd", unit)
+    unit_failed_last = unit_failure is not None and (
+        last is None or _as_utc(unit_failure.started_at) > _as_utc(last.started_at)
+    )
+    if last is None and unit_failure is None:
+        state = "never"
+    elif unit_failed_last or last.status == "failed":
+        state = "failed"
+    elif last.status == "running":
+        state = "running"
+    elif success is None or success.finished_at is None or (
+        now - _as_utc(success.finished_at) > max_age
+    ):
+        state = "stale"
+    else:
+        state = "ok"
+    return {
+        "state": state,
+        "unit": unit,
+        "max_age_hours": max_age.total_seconds() / 3600,
+        "last_status": last.status if last else None,
+        "last_run_at": last.started_at if last else None,
+        "last_success_at": success.finished_at if success else None,
+        "last_unit_failure_at": unit_failure.finished_at if unit_failure else None,
+        "error": unit_failure.error if unit_failed_last else (last.error if last else None),
+        "counters": success.counters if success else None,
+    }

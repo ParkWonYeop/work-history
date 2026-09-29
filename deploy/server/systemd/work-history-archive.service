@@ -1,5 +1,6 @@
 [Unit]
 Description=Encrypt and mirror expiring raw work-history records
+OnFailure=work-history-failure@%n.service
 After=network-online.target postgresql.service
 Wants=network-online.target
 

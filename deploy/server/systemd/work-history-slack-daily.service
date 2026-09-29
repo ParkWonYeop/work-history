@@ -1,5 +1,6 @@
 [Unit]
 Description=Reconcile the previous Seoul-calendar day of Slack messages
+OnFailure=work-history-failure@%n.service
 After=network-online.target postgresql.service
 Wants=network-online.target
 

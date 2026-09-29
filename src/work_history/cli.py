@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import uvicorn
@@ -18,7 +19,7 @@ from work_history.api import create_app
 from work_history.collectors import ConfluenceCollector, JiraCollector, SlackCollector
 from work_history.config import Settings
 from work_history.db import create_database_engine, create_session_factory
-from work_history.models import Base, IngestDevice, utcnow
+from work_history.models import Base, IngestDevice, SyncRun, utcnow
 from work_history.security import b64url_decode
 from work_history.services import (
     cleanup_expired,
@@ -61,6 +62,27 @@ def _archive_lock() -> Iterator[None]:
         except BlockingIOError as exc:
             raise RuntimeError("another raw archive operation is already running") from exc
         yield
+
+
+@contextmanager
+def _tracked_run(session_factory, source: str, job_kind: str) -> Iterator[dict[str, Any]]:
+    """Record a job in sync_runs so the status APIs can report its last success."""
+    with session_factory() as session:
+        run_id = start_sync_run(session, source, job_kind).id
+        session.commit()
+    result: dict[str, Any] = {}
+    status, error = "success", None
+    try:
+        yield result
+    except BaseException as exc:
+        status, error = "failed", str(exc)[:4000] or type(exc).__name__
+        raise
+    finally:
+        with session_factory() as session:
+            run = session.get(SyncRun, run_id)
+            if run:
+                finish_sync_run(run, status, result, error)
+                session.commit()
 
 
 def _collector(source: str, settings: Settings):
@@ -120,41 +142,51 @@ def _sync_one(
     cursor_stream: str = "default",
     advance_slack_coverage: bool = False,
     slack_coverage_seed: datetime | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     with session_factory() as session:
-        run = start_sync_run(session, source, job_kind)
-        run_id = run.id
+        run_id = start_sync_run(session, source, job_kind).id
+        previous = get_cursor(session, source, cursor_stream) or {}
         session.commit()
-    collector = _collector(source, settings)
+    collector = None
     try:
+        collector = _collector(source, settings)
+        # Skipping unchanged Jira issues is only sound along the contiguous incremental chain.
+        if job_kind == "incremental" and cursor_stream == "default" and hasattr(
+            collector, "known_updates"
+        ):
+            collector.known_updates = previous.get("issues") or {}
         batch = collector.collect(start, end)
+        extra = dict(getattr(collector, "counters", {}))
+        status = "partial" if extra.get("failed_queries") else "success"
         with session_factory() as session:
             counts = upsert_normalized_batch(
                 session,
                 batch,
                 settings.raw_retention_days,
             )
-            set_cursor(
-                session,
-                source,
-                cursor_stream,
-                {"until": end.isoformat(), "last_success": utcnow().isoformat()},
-            )
+            cursor: dict[str, Any] = {
+                "until": end.isoformat(),
+                "last_success": utcnow().isoformat(),
+            }
+            if cursor_stream == "default" and hasattr(collector, "seen_updates"):
+                cursor["issues"] = collector.seen_updates
+            set_cursor(session, source, cursor_stream, cursor)
             if source == "slack" and advance_slack_coverage:
                 _advance_slack_coverage(session, start, end, slack_coverage_seed)
-            run = session.get(type(run), run_id)
-            finish_sync_run(run, "success", {**counts, "records": batch.record_count})
+            counters = {**counts, "records": batch.record_count, **extra}
+            finish_sync_run(session.get(SyncRun, run_id), status, counters)
             session.commit()
-        return {**counts, "records": batch.record_count}
+        return {"status": status, **counters}
     except Exception as exc:
         with session_factory() as session:
-            run = session.get(type(run), run_id)
+            run = session.get(SyncRun, run_id)
             if run:
                 finish_sync_run(run, "failed", error=str(exc)[:4000])
                 session.commit()
         raise
     finally:
-        collector.close()
+        if collector is not None:
+            collector.close()
 
 
 def command_sync(args: argparse.Namespace, settings: Settings, session_factory) -> int:
@@ -332,6 +364,10 @@ def build_parser() -> argparse.ArgumentParser:
     archive_fetch = sub.add_parser("archive-fetch")
     archive_fetch.add_argument("--batch-id", required=True)
     archive_fetch.add_argument("--output", type=Path, required=True)
+    backup_offsite = sub.add_parser("backup-offsite")
+    backup_offsite.add_argument("path", type=Path)
+    record_failure = sub.add_parser("record-failure")
+    record_failure.add_argument("--unit", required=True)
     sub.add_parser("cleanup")
     return parser
 
@@ -405,12 +441,19 @@ def main() -> None:
         manager = RawArchiveManager(settings, session_factory, store)
         with _archive_lock():
             if args.command == "archive":
-                result = manager.archive_pending(
-                    include_current=args.all,
-                    max_batches=args.max_batches,
-                )
+                job_kind = "archive_all" if args.all else "archive"
+                with _tracked_run(session_factory, "raw_archive", job_kind) as result:
+                    result.update(
+                        manager.archive_pending(
+                            include_current=args.all,
+                            max_batches=args.max_batches,
+                        )
+                    )
+                    result["r2"] = manager.inventory()
             elif args.command == "archive-verify":
-                result = manager.verify_all(remote=not args.local_only)
+                job_kind = "archive_verify_local" if args.local_only else "archive_verify"
+                with _tracked_run(session_factory, "raw_archive", job_kind) as result:
+                    result.update(manager.verify_all(remote=not args.local_only))
             elif args.command == "archive-check":
                 result = store.check()
             else:
@@ -424,10 +467,28 @@ def main() -> None:
             result = list_archive_batches(session)
         print(json.dumps(result))
         return
+    if args.command == "backup-offsite":
+        from work_history.raw_archive import R2Store, upload_db_backup
+
+        with _tracked_run(session_factory, "backup", "offsite") as result:
+            settings.require_raw_archive()
+            result.update(upload_db_backup(settings, R2Store(settings), args.path))
+        print(json.dumps(result))
+        return
+    if args.command == "record-failure":
+        details = [
+            f"{name.removeprefix('MONITOR_').lower()}={os.environ[name]}"
+            for name in ("MONITOR_SERVICE_RESULT", "MONITOR_EXIT_CODE", "MONITOR_EXIT_STATUS")
+            if os.getenv(name)
+        ]
+        with session_factory() as session:
+            run = start_sync_run(session, "systemd", args.unit[:64])
+            finish_sync_run(run, "failed", error=" ".join(details) or "unit failed")
+            session.commit()
+        return
     if args.command == "cleanup":
         with session_factory() as session:
             result = cleanup_expired(session)
-            session.commit()
         print(json.dumps(result))
         return
 

@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -24,6 +24,7 @@ from work_history.models import (
     Base,
     GeneratedReport,
     IngestDevice,
+    RawArchiveBatch,
     SyncCursor,
     SyncRun,
 )
@@ -60,10 +61,35 @@ from work_history.security import (
     verify_request_signature,
 )
 from work_history.services import (
+    BatchConflictError,
     get_cursor,
     ingest_gitlab_batch,
+    job_status,
+    latest_run,
     remember_nonce,
 )
+
+# name -> (source, job_kind, systemd unit, oldest acceptable last success)
+ARCHIVE_JOBS = {
+    "archive": (
+        "raw_archive",
+        "archive",
+        "work-history-archive.service",
+        timedelta(hours=26),
+    ),
+    "archive_verify": (
+        "raw_archive",
+        "archive_verify",
+        "work-history-archive-verify.service",
+        timedelta(days=8),
+    ),
+    "db_backup_offsite": (
+        "backup",
+        "offsite",
+        "work-history-backup.service",
+        timedelta(hours=26),
+    ),
+}
 
 
 class SlidingWindowLimiter:
@@ -151,6 +177,9 @@ def create_app(
         finally:
             session.close()
 
+    async def raw_body(request: Request) -> bytes:
+        return await request.body()
+
     def client_key(request: Request, category: str) -> str:
         host = request.client.host if request.client else "unknown"
         return f"{category}:{host}"
@@ -173,7 +202,9 @@ def create_app(
                 detail="invalid bearer token",
             )
 
-    async def authenticate_device(
+    # Signed routes are sync so FastAPI runs their DB work in the threadpool; only the body
+    # is read on the event loop through raw_body.
+    def authenticate_device(
         request: Request,
         session: Session,
         body: bytes,
@@ -221,8 +252,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="replayed request nonce") from exc
         return device_id
 
-    @app.exception_handler(ValueError)
-    async def value_error_handler(_: Request, exc: ValueError) -> JSONResponse:
+    @app.exception_handler(BatchConflictError)
+    async def batch_conflict_handler(_: Request, exc: BatchConflictError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.get("/healthz")
@@ -238,12 +269,12 @@ def create_app(
         dependencies=[Depends(require_read_token)],
     )
     def sync_status(session: Session = Depends(db_session)) -> dict[str, Any]:
-        runs = session.scalars(select(SyncRun).order_by(SyncRun.started_at.desc()).limit(100)).all()
         latest: dict[str, Any] = {}
-        for run in runs:
-            if run.source in latest:
+        for source in sorted(session.scalars(select(SyncRun.source).distinct())):
+            run = latest_run(session, source)
+            if run is None:
                 continue
-            latest[run.source] = {
+            latest[source] = {
                 "status": run.status,
                 "job_kind": run.job_kind,
                 "started_at": run.started_at,
@@ -343,6 +374,52 @@ def create_app(
         )
 
     @app.get(
+        "/v1/archive-status",
+        dependencies=[Depends(require_read_token)],
+    )
+    def archive_status(session: Session = Depends(db_session)) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        verified_batches, verified_records, verified_bytes = session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(RawArchiveBatch.record_count), 0),
+                func.coalesce(func.sum(RawArchiveBatch.ciphertext_size), 0),
+            ).where(RawArchiveBatch.status == "verified")
+        ).one()
+        batches_by_status = dict(
+            session.execute(
+                select(RawArchiveBatch.status, func.count()).group_by(RawArchiveBatch.status)
+            ).all()
+        )
+        inventory_run = latest_run(session, "raw_archive", "archive", "success")
+        inventory = (inventory_run.counters or {}).get("r2") if inventory_run else None
+        r2 = None
+        if inventory:
+            # Compare against the ledger captured with the listing, not the live totals.
+            r2 = {
+                **inventory,
+                "checked_at": inventory_run.finished_at,
+                "consistent": inventory["missing_verified_objects"] == 0
+                and inventory["size_mismatches"] == 0
+                and inventory["untracked_raw_objects"] == 0
+                and inventory["raw_bytes"] == inventory["db_verified_bytes"],
+            }
+        return {
+            "generated_at": now,
+            "db": {
+                "verified_batches": verified_batches,
+                "verified_records": verified_records,
+                "verified_ciphertext_bytes": verified_bytes,
+                "batches_by_status": batches_by_status,
+            },
+            "r2": r2,
+            "jobs": {
+                name: job_status(session, source, job_kind, unit, max_age, now)
+                for name, (source, job_kind, unit, max_age) in ARCHIVE_JOBS.items()
+            },
+        }
+
+    @app.get(
         "/v1/artifacts/{source}/{remote_id:path}",
         response_model=ArtifactItem,
         dependencies=[Depends(require_read_token)],
@@ -380,11 +457,11 @@ def create_app(
         "/v1/ingest/gitlab/checkpoint",
         response_model=CheckpointResponse,
     )
-    async def gitlab_checkpoint(
+    def gitlab_checkpoint(
         request: Request,
         session: Session = Depends(db_session),
     ) -> CheckpointResponse:
-        device_id = await authenticate_device(request, session, b"", "gitlab_ingest")
+        device_id = authenticate_device(request, session, b"", "gitlab_ingest")
         return CheckpointResponse(
             device_id=device_id,
             checkpoint=get_cursor(session, "gitlab", device_id),
@@ -394,14 +471,14 @@ def create_app(
         "/v1/ingest/gitlab/batches",
         response_model=IngestResponse,
     )
-    async def gitlab_batches(
+    def gitlab_batches(
         request: Request,
+        wire_body: bytes = Depends(raw_body),
         session: Session = Depends(db_session),
     ) -> IngestResponse:
-        wire_body = await request.body()
         if len(wire_body) > settings.ingest_max_uncompressed_bytes + 1024 * 1024:
             raise HTTPException(status_code=413, detail="request body is too large")
-        device_id = await authenticate_device(request, session, wire_body, "gitlab_ingest")
+        device_id = authenticate_device(request, session, wire_body, "gitlab_ingest")
         if request.headers.get("Content-Encoding", "").lower() == "gzip":
             body = _read_gzip_limited(
                 wire_body,
@@ -433,14 +510,14 @@ def create_app(
         "/v1/report-agent/context",
         response_model=ReportContextResponse,
     )
-    async def report_context(
+    def report_context(
         request: Request,
+        body: bytes = Depends(raw_body),
         session: Session = Depends(db_session),
     ) -> ReportContextResponse:
-        body = await request.body()
         if len(body) > 16_384:
             raise HTTPException(status_code=413, detail="request body is too large")
-        await authenticate_device(request, session, body, "report_agent")
+        authenticate_device(request, session, body, "report_agent")
         try:
             payload = ReportContextRequest.model_validate_json(body)
             parsed_period = parse_period(payload.cadence, payload.period)
@@ -454,14 +531,14 @@ def create_app(
         "/v1/report-agent/missing",
         response_model=ReportMissingResponse,
     )
-    async def report_missing(
+    def report_missing(
         request: Request,
+        body: bytes = Depends(raw_body),
         session: Session = Depends(db_session),
     ) -> ReportMissingResponse:
-        body = await request.body()
         if len(body) > 16_384:
             raise HTTPException(status_code=413, detail="request body is too large")
-        await authenticate_device(request, session, body, "report_agent")
+        authenticate_device(request, session, body, "report_agent")
         try:
             payload = ReportMissingRequest.model_validate_json(body)
         except ValueError as exc:
@@ -479,17 +556,17 @@ def create_app(
         "/v1/reports/{cadence}/{period}/{kind}",
         response_model=ReportItem,
     )
-    async def put_report(
+    def put_report(
         cadence: Literal["daily", "weekly", "monthly", "overall"],
         period: str,
         kind: Literal["work_report", "feedback"],
         request: Request,
+        body: bytes = Depends(raw_body),
         session: Session = Depends(db_session),
     ) -> ReportItem:
-        body = await request.body()
         if len(body) > 1_100_000:
             raise HTTPException(status_code=413, detail="request body is too large")
-        await authenticate_device(request, session, body, "report_agent")
+        authenticate_device(request, session, body, "report_agent")
         try:
             parsed_period = parse_period(cadence, period)
             payload = ReportUpsertRequest.model_validate_json(body)

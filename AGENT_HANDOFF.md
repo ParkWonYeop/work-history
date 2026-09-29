@@ -45,8 +45,8 @@
 | Atlassian API 토큰 | /etc/work-history/credentials/atlassian-api-token | sync, reconcile, backfill |
 | Slack user token | /etc/work-history/credentials/slack-user-token | Slack daily/backfill |
 | Slack app token | /etc/work-history/credentials/slack-app-token | Socket Mode |
-| R2 Access Key ID | /etc/work-history/credentials/r2-access-key-id | archive/verify |
-| R2 Secret Access Key | /etc/work-history/credentials/r2-secret-access-key | archive/verify |
+| R2 Access Key ID | /etc/work-history/credentials/r2-access-key-id | archive/verify, DB 외부 백업 |
+| R2 Secret Access Key | /etc/work-history/credentials/r2-secret-access-key | archive/verify, DB 외부 백업 |
 | Mac GitLab PAT·장치 개인키 | macOS Keychain | GitLab 에이전트 |
 | Report Agent 개인키 | Keychain service com.workhistory.report-agent | 보고서 서명 |
 | age 개인키 | Keychain service com.workhistory.raw-archive + 비밀번호 관리자 복구본 | 원본 복호화 |
@@ -68,7 +68,8 @@
 | 메서드 | 엔드포인트 | 용도 |
 |---|---|---|
 | GET | /healthz | API·DB 상태 |
-| GET | /v1/sync-status | 소스별 최근 수집 상태 |
+| GET | /v1/sync-status | 소스별 최근 수집 상태, systemd unit 실패 기록 |
+| GET | /v1/archive-status | 아카이브 원장·R2 목록 비교·archive/verify/DB 외부 백업 작업 상태 |
 | GET | /v1/activities?from=&to=&sources=&cursor=&limit= | 업무 활동. 최대 31일/요청, 500건/페이지 |
 | GET | /v1/artifacts/{source}/{remote_id} | 이슈·페이지·MR·커밋 상세 |
 | GET | /v1/reports?cadence=&kind=&status=&from=&to= | 보고서 목록 |
@@ -149,12 +150,14 @@ PostgreSQL은 Unix socket/localhost 전용으로 유지한다. 공유기 SSH 포
 |---|---|
 | 부팅 5분 뒤, 이후 10분마다 | Jira·Confluence 증분 수집 |
 | 09:05~17:05 매시 | 전날 Slack 재검증, 최대 2분 지터 |
-| 매일 02:30 | DB backup + 별도 DB 실제 복원 시험 |
-| 매일 03:30 | 만료 7일 전 raw JSON 암호화 아카이브 |
+| 매일 02:30 | DB backup + 별도 DB 실제 복원 시험 + age 암호화본 R2 db/v1/ 업로드(7개 보관) |
+| 매일 03:30 | 만료 7일 전 raw JSON 암호화 아카이브 + R2 버킷 목록·원장 비교 기록 |
 | 매일 03:30 + 최대 5분 | 최근 14일 재검증 |
 | 매일 04:10 | 검증된 아카이브 지문만 DB raw 삭제 |
 | 일요일 05:00 | 로컬·R2 암호문 SHA-256 전체 검증 |
 | 매일 11:00 | Codex Report Agent: gpt-5.6-sol / high |
+
+모든 unit은 실패하면 work-history-failure@.service가 sync_runs에 source=systemd로 기록한다. Slack 앱은 읽기 권한만 있어 직접 알림을 보내지 않으며, Codex "R2 무료 한도 일일 점검" 자동화가 /v1/archive-status를 읽어 알린다.
 
 보고서는 generated_reports와 generated_report_versions에 저장한다. Slack 최신성이 부족하면 partial 상태로 저장하고 원본이 최신화되면 재생성 대상이 된다.
 
@@ -180,6 +183,8 @@ GitLab 재수집은 VPN 연결된 Mac에서만 한다.
 
     work-history-agent --config '/Users/you/Library/Application Support/WorkHistoryAgent/config.toml' replay --from '2026-04-01T00:00:00+09:00' --to '<현재 KST 시각>' --chunk-days 7
 
+R2 raw/v1/만 무기한 잠근다. db/v1/은 DB 백업 7개 보관 정리를 코드가 하므로 잠그지 않는다.
+
 R2 오염 객체를 교체할 때는 새 객체 업로드·원격 검증·DB 원장 등록을 먼저 끝낸다. 그 뒤에만 Bucket Lock을 잠시 해제하여 키·크기·SHA-256이 모두 맞는 기존 객체 하나만 삭제하고 즉시 raw/v1/ 무기한 잠금을 다시 건다.
 
 도구:
@@ -190,6 +195,7 @@ R2 오염 객체를 교체할 때는 새 객체 업로드·원격 검증·DB 원
 ## 12. 점검 명령
 
     curl --fail-with-body https://work-history.example.com/healthz
+    curl --fail-with-body -H "Authorization: Bearer $READ_API_TOKEN" https://work-history.example.com/v1/archive-status
     systemctl list-timers 'work-history-*'
     journalctl -u work-history-sync.service -n 100 --no-pager
     journalctl -u work-history-slack-daily.service -n 100 --no-pager
@@ -206,5 +212,6 @@ R2 오염 객체를 교체할 때는 새 객체 업로드·원격 검증·DB 원
 - [ ] Atlassian, Slack, GitLab, R2의 회사 정책상 권한 확인
 - [ ] Mac Keychain의 GitLab·Report Agent·age 개인키와 비밀번호 관리자 age 복구본 확인
 - [ ] NPM, Cloudflare DNS/SSL 관리 권한
-- [ ] healthz 성공, backup 복원 성공, R2 verify 성공 확인
+- [ ] healthz 성공, backup 복원 성공, R2 verify 성공, /v1/archive-status의 jobs 전부 ok 확인
 - [ ] 변경 전 pytest -q, ruff check ., 셸 문법 검사 실행
+- [ ] 의존성 변경 시 constraints.txt 재생성(README 18장)

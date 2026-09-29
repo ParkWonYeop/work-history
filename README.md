@@ -339,7 +339,14 @@ DB를 갱신하지 않는다.
 - raw 원본 정리: 매일 04:10 KST
 - 원본 암호화 아카이브: 매일 03:30 KST
 - 로컬·R2 전체 무결성 검사: 매주 일요일 05:00 KST
-- DB 백업: 매일 02:30 KST
+- DB 백업: 매일 02:30 KST, 복원 시험 통과본을 age로 암호화해 R2 `db/v1/`에 업로드(최근 7개 보관)
+
+증분 수집은 직전 증분 실행 이후 `updated`가 바뀌지 않은 Jira 이슈의 상세 조회를 건너뛴다. 03:30
+재검증은 항상 전체를 다시 읽으므로, 드물게 `updated`를 바꾸지 않는 변경도 하루 안에 반영된다. Jira
+후보 검색 일부가 실패하면 실행은 `partial`로 기록된다.
+
+모든 수집·백업·아카이브 unit은 실패하면 `work-history-failure@.service`가 `sync_runs`에
+`source=systemd` 실패로 남긴다. `/v1/sync-status`와 `/v1/archive-status`에서 확인할 수 있다.
 
 ## 9A. Slack 앱과 초기 수집
 
@@ -400,9 +407,10 @@ public/private 채널, IM, MPIM 모두 Slack이 반환한 현재 membership을 �
 빈틈없이 전진한 `coverage` cursor로 판정한다. 따라서 초기 백필이 아직 도달하지 않은 과거 보고서가
 Slack 자료 없이 `final`로 잘못 확정되지 않는다.
 
-설치 전 이미 삭제된 메시지와 Slack 보존 정책으로 사라진 기록은 백필할 수 없다. Socket Mode가
-중지된 동안 오래된 스레드 원문에 달린 새 답글이나 과거 메시지 편집·삭제는 전날 history API만으로
-완전히 복원되지 않을 수 있으므로 실시간 서비스를 항상 켜고 매일 재검증 결과를 확인한다.
+설치 전 이미 삭제된 메시지와 Slack 보존 정책으로 사라진 기록은 백필할 수 없다. 재검증과 백필은
+최근 30일 안에 시작된 스레드의 새 답글(`latest_reply`)까지 읽는다. Socket Mode가 중지된 동안 그보다
+오래된 스레드에 달린 답글이나 과거 메시지 편집·삭제는 history API만으로 완전히 복원되지 않을 수
+있으므로 실시간 서비스를 항상 켜고 매일 재검증 결과를 확인한다.
 
 ## 10. macOS GitLab Agent 설치
 
@@ -552,6 +560,7 @@ GET /healthz
 
 ```text
 GET /v1/sync-status
+GET /v1/archive-status
 GET /v1/activities?from=RFC3339&to=RFC3339&sources=jira,gitlab,slack&cursor=&limit=200
 GET /v1/artifacts/{source}/{remote_id}
 GET /v1/reports?cadence=daily&kind=work_report&status=final&from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -560,6 +569,11 @@ GET /v1/reports/{daily|weekly|monthly|overall}/{period}/{work_report|feedback}
 
 활동 조회는 한 요청당 최대 31일, 페이지당 최대 500건이다. `next_cursor`가 null이 될 때까지 이어서
 조회한다.
+
+`/v1/archive-status`는 DB 아카이브 원장 합계, 03:30 archive 실행이 저장한 R2 버킷 목록 결과
+(객체 수·바이트·원장과의 불일치 수), archive·archive-verify·DB 외부 백업 작업의 마지막 성공 시각과
+상태(`ok`, `stale`, `failed`, `running`, `never`)를 돌려준다. API 프로세스에는 R2 자격증명이 없으며
+객체를 내려받지 않는다.
 
 읽기 토큰은 LXC에서만 확인한다.
 
@@ -732,10 +746,25 @@ sudo -u postgres psql -d workhistory_restore_test -c '\\dt'
 ```
 
 실제 복원은 서비스를 중지하고 현재 DB 백업을 하나 더 만든 뒤 수행해야 한다. 실제 운영 DB 삭제는 이
-문서의 복원 시험 명령에 포함하지 않는다. 현재 PostgreSQL 자동 백업은 같은 LXC 저장소에 있으므로
-호스트·스토리지 동시 장애에는 취약하다. R2는 원본 JSON 암호문만 외부에 보존하며 정규화 데이터와
-보고서의 DB 백업을 대신하지 않는다. 중요도가 높아지면 Proxmox guest backup을 별도 물리 스토리지에
-구성한다.
+문서의 복원 시험 명령에 포함하지 않는다.
+
+복원 시험을 통과한 dump는 원본 아카이브와 같은 age 공개키로 암호화되어
+`db/v1/YYYY/MM/workhistory-<UTC>.dump.age`로 R2에 올라가고, 업로드 후 전체 SHA-256을 다시 검증한다.
+R2에는 최근 7개만 남기고 오래된 것은 코드가 지우므로 `db/v1/`에는 Bucket Lock을 걸지 않는다.
+`archive.env`의 `RAW_ARCHIVE_AGE_RECIPIENT`가 비어 있으면 이 단계는 건너뛴다. LXC가 사라졌을 때는 R2에서
+객체를 받아 Mac에서 복호화한 뒤 `pg_restore`로 복원한다.
+
+```sh
+umask 077
+IDENTITY=$(mktemp)
+security find-generic-password -a age-identity -s com.workhistory.raw-archive -w > "$IDENTITY"
+age -d -i "$IDENTITY" workhistory-20260929T023000Z.dump.age > workhistory.dump
+rm -f "$IDENTITY"
+pg_restore --list workhistory.dump | head
+```
+
+R2 사본은 하루 한 번이므로 마지막 백업 이후 변경분은 잃을 수 있다. 중요도가 높아지면 Proxmox guest
+backup을 별도 물리 스토리지에 추가한다.
 
 생성 보고서는 수집 기록을 해석한 2차 문서다. 업무 증빙으로 사용할 때는 보고서만 제시하지 말고
 원본 Jira·Confluence·GitLab·Slack 링크, 발생 시각과 저장된 버전을 함께 제시한다.
@@ -825,8 +854,9 @@ route -n get gitlab.internal.example
 
 - `work-history archive-check`로 R2 버킷 접근을 확인한다.
 - `journalctl -u work-history-archive.service`에서 age, zstd, R2 또는 checksum 오류를 확인한다.
+- `/v1/archive-status`에서 작업 상태, 막힌 배치 수(`batches_by_status`), R2와 원장의 불일치 수를 확인한다.
 - `local_verified` 배치는 다음 실행에서 같은 객체를 먼저 검증한다. 이미 올바르게 존재하면 덮어쓰지 않고
-  완료 처리한다.
+  완료 처리한다. 이 배치가 계속 실패하면 새 아카이브도 만들어지지 않으므로 먼저 해결한다.
 - 오류 중에는 04:10 cleanup이 해당 원본을 보존한다. 문제 해결 전 DB raw를 수동 삭제하지 않는다.
 - 개인키는 서버 장애 해결에 필요하지 않으며 서버로 복사해서는 안 된다.
 
@@ -836,7 +866,7 @@ Python 3.11 이상이 필요하다.
 
 ```sh
 python3.11 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install -c constraints.txt -e '.[dev]'
 .venv/bin/pytest
 .venv/bin/ruff check .
 ```
@@ -851,6 +881,9 @@ export READ_API_TOKEN='development-only-token'
 ```
 
 개발 토큰은 운영에 사용하지 않는다. `.env`, DB, report export, Keychain 값은 Git에 추가하지 않는다.
+
+설치 스크립트는 `constraints.txt`의 검증된 버전으로 설치한다. `pyproject.toml`의 의존성을 바꾸면 새
+venv에서 `pip install '.[dev]'` 후 `pip freeze --exclude work-history`로 파일을 다시 만들고 테스트한다.
 
 ## 19. 운영 전 최종 점검
 
@@ -874,4 +907,6 @@ export READ_API_TOKEN='development-only-token'
 - [ ] 초기 전체 아카이브의 DB·JSONL 건수와 로컬·R2 SHA-256이 일치함
 - [ ] Mac에서 실제 객체 하나를 복호화하고 manifest·payload 해시 검증을 통과함
 - [ ] 03:30 archive, 04:10 cleanup, 일요일 05:00 verify timer가 활성화됨
+- [ ] `/v1/archive-status`의 `jobs`가 모두 `ok`이고 `r2.consistent`가 true임
+- [ ] R2 `db/v1/`에 DB 백업 암호문이 올라가고 Mac에서 복호화한 dump가 `pg_restore --list`를 통과함
 - [ ] 업무 보고서와 export가 Git 저장소에 포함되지 않음

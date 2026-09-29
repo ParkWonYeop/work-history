@@ -1,0 +1,21 @@
+[Unit]
+Description=Record the failure of %i for the work-history status APIs
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=workhistory
+Group=workhistory
+EnvironmentFile=/etc/work-history/server.env
+ExecStart=/opt/work-history/venv/bin/work-history record-failure --unit %i
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+UMask=0077

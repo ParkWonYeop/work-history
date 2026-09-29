@@ -107,8 +107,58 @@ curl --fail-with-body --silent --show-error \
 }
 ```
 
-`status=success`는 마지막 수집 실행의 성공 여부다. 실제 업무 기간까지 수집됐는지는 `finished_at`과
-보고서의 `source_snapshot`을 함께 확인한다.
+`status=success`는 마지막 수집 실행의 성공 여부다. `partial`은 실행은 끝났지만 Jira 후보 검색 일부가
+실패했다는 뜻이며 `counters.failed_queries`에 개수가 있다. `systemd` 항목은 unit 실패 기록이다(`job_kind`가
+unit 이름). 실제 업무 기간까지 수집됐는지는 `finished_at`과 보고서의 `source_snapshot`을 함께 확인한다.
+
+### 원본 아카이브·DB 백업 상태
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer ${WORK_HISTORY_API_TOKEN:?}" \
+  "${WORK_HISTORY_API_URL:?}/v1/archive-status" | jq
+```
+
+응답 예시(주요 필드):
+
+```json
+{
+  "generated_at": "2026-09-29T23:30:00Z",
+  "db": {
+    "verified_batches": 12,
+    "verified_records": 48210,
+    "verified_ciphertext_bytes": 318734112,
+    "batches_by_status": {"verified": 12}
+  },
+  "r2": {
+    "checked_at": "2026-09-29T18:34:10Z",
+    "objects": 19,
+    "bytes": 402113880,
+    "raw_objects": 12,
+    "raw_bytes": 318734112,
+    "db_verified_batches": 12,
+    "db_verified_bytes": 318734112,
+    "missing_verified_objects": 0,
+    "size_mismatches": 0,
+    "untracked_raw_objects": 0,
+    "consistent": true
+  },
+  "jobs": {
+    "archive": {"state": "ok", "last_success_at": "2026-09-29T18:34:10Z", "max_age_hours": 26.0},
+    "archive_verify": {"state": "ok", "last_success_at": "2026-09-27T20:05:41Z", "max_age_hours": 192.0},
+    "db_backup_offsite": {"state": "ok", "last_success_at": "2026-09-29T17:31:02Z", "max_age_hours": 26.0}
+  }
+}
+```
+
+- `db`는 조회 시점의 DB 원장 합계다. `local_verified`·`failed`·`creating` 배치가 남아 있으면
+  `batches_by_status`에 나타난다.
+- `r2`는 매일 03:30 archive 실행이 저장한 버킷 목록 결과다. `bytes`는 DB 백업(`db/v1/`)을 포함한 버킷
+  전체 저장량이고 `raw_*`는 원본 아카이브 prefix만 센다. `consistent`는 같은 시점의 원장과 비교해 누락·크기
+  불일치·원장에 없는 객체가 없고 바이트 합이 같은지를 뜻한다. archive가 한 번도 성공하지 않았으면 `null`이다.
+- `jobs.*.state`는 `ok`, `stale`(마지막 성공이 `max_age_hours`보다 오래됨), `failed`(마지막 실행이나 unit
+  실패 기록이 실패), `running`, `never` 중 하나다. `failed`이면 `error`에 원인이 있다.
+- 이 API는 DB만 읽는다. R2 객체를 내려받거나 R2 자격증명을 사용하지 않는다.
 
 ## 4. 업무 활동 조회
 

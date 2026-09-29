@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -18,10 +20,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from work_history.config import Settings
 from work_history.models import RawArchiveBatch, RawArchiveEntry, RawRecord, utcnow
 
+logger = logging.getLogger(__name__)
+
 FORMAT_VERSION = 1
 VERIFIED_STATUS = "verified"
 LOCAL_VERIFIED_STATUS = "local_verified"
 SCAN_PAGE_SIZE = 100
+DB_BACKUP_PREFIX = "db/v1"
+# ponytail: fixed daily-backup retention in R2; make it a setting if storage needs tuning.
+DB_BACKUP_KEEP = 7
+_DB_BACKUP_KEY = re.compile(
+    rf"^{re.escape(DB_BACKUP_PREFIX)}/\d{{4}}/\d{{2}}/workhistory-\d{{8}}T\d{{6}}Z\.dump\.age$"
+)
 
 
 def _utc_iso(value: datetime) -> str:
@@ -146,6 +156,17 @@ class R2Store:
     def check(self) -> dict[str, str]:
         self.client.head_bucket(Bucket=self.bucket)
         return {"bucket": self.bucket, "status": "ok"}
+
+    def list_objects(self, prefix: str = "") -> dict[str, int]:
+        sizes: dict[str, int] = {}
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents") or []:
+                sizes[str(item["Key"])] = int(item["Size"])
+        return sizes
+
+    def delete_object(self, object_key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=object_key)
 
     def upload_verified(
         self,
@@ -593,6 +614,35 @@ class RawArchiveManager:
             batches += 1
         return {"batches": batches, "records": records}
 
+    def inventory(self) -> dict[str, int]:
+        """Compare the real bucket listing with the archive ledger without downloading."""
+        objects = self.store.list_objects()
+        prefix = f"{self.settings.raw_archive_r2_prefix}/"
+        with self.session_factory() as session:
+            ledger = session.execute(
+                select(
+                    RawArchiveBatch.object_key,
+                    RawArchiveBatch.status,
+                    RawArchiveBatch.ciphertext_size,
+                )
+            ).all()
+        known = {key for key, _, _ in ledger}
+        verified = {key: size for key, status, size in ledger if status == VERIFIED_STATUS}
+        raw_objects = {key: size for key, size in objects.items() if key.startswith(prefix)}
+        return {
+            "objects": len(objects),
+            "bytes": sum(objects.values()),
+            "raw_objects": len(raw_objects),
+            "raw_bytes": sum(raw_objects.values()),
+            "db_verified_batches": len(verified),
+            "db_verified_bytes": sum(size or 0 for size in verified.values()),
+            "missing_verified_objects": sum(1 for key in verified if key not in objects),
+            "size_mismatches": sum(
+                1 for key, size in verified.items() if key in objects and objects[key] != size
+            ),
+            "untracked_raw_objects": sum(1 for key in raw_objects if key not in known),
+        }
+
     def verify_all(self, *, remote: bool = True) -> dict[str, int]:
         self._validate_base_dir()
         with self.session_factory() as session:
@@ -662,3 +712,61 @@ def list_archive_batches(session: Session) -> list[dict[str, Any]]:
         }
         for batch in batches
     ]
+
+
+def upload_db_backup(
+    settings: Settings,
+    store: R2Store,
+    dump: Path,
+    keep: int = DB_BACKUP_KEEP,
+) -> dict[str, Any]:
+    """Encrypt a verified pg_dump to the age recipient, upload it to R2 and prune old ones."""
+    if dump.is_symlink() or not dump.is_file():
+        raise RuntimeError(f"database dump is missing or unsafe: {dump}")
+    if not re.fullmatch(r"workhistory-\d{8}T\d{6}Z\.dump", dump.name):
+        raise RuntimeError(f"unexpected database dump name: {dump.name}")
+    if shutil.which("age") is None:
+        raise RuntimeError("required archive executable is missing: age")
+    created = utcnow()
+    object_key = f"{DB_BACKUP_PREFIX}/{created:%Y/%m}/{dump.name}.age"
+    part = dump.with_name(f".{dump.name}.age.{uuid.uuid4().hex}.part")
+    try:
+        with _exclusive_binary_file(part) as output:
+            encryptor = subprocess.run(
+                ["age", "-r", settings.raw_archive_age_recipient, str(dump)],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if encryptor.returncode != 0:
+                raise RuntimeError(
+                    f"age failed: {encryptor.stderr.decode('utf-8', 'replace')[:1000]}"
+                )
+            output.flush()
+            os.fsync(output.fileno())
+        with part.open("rb") as stream:
+            checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+        size = part.stat().st_size
+        store.upload_verified(part, object_key, checksum, size)
+    finally:
+        part.unlink(missing_ok=True)
+
+    backups = sorted(
+        key for key in store.list_objects(f"{DB_BACKUP_PREFIX}/") if _DB_BACKUP_KEY.match(key)
+    )
+    pruned = prune_errors = 0
+    for old_key in backups[:-keep] if keep > 0 else []:
+        try:
+            store.delete_object(old_key)
+            pruned += 1
+        except Exception:  # a lock or permission change must not fail a good backup
+            logger.warning("Could not prune old database backup %s", old_key, exc_info=True)
+            prune_errors += 1
+    return {
+        "object_key": object_key,
+        "bytes": size,
+        "sha256": checksum,
+        "remote_backups": len(backups) - pruned,
+        "pruned": pruned,
+        "prune_errors": prune_errors,
+    }

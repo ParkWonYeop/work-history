@@ -1,5 +1,6 @@
 [Unit]
 Description=Create the initial permanent archive of all current raw records
+OnFailure=work-history-failure@%n.service
 After=network-online.target postgresql.service
 Wants=network-online.target
 

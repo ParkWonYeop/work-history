@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from work_history.api import create_app
-from work_history.models import IngestDevice
+from work_history.models import IngestDevice, RawArchiveBatch, SyncRun
 from work_history.schemas import (
     ActivityRecord,
     ArtifactRecord,
@@ -168,3 +168,100 @@ def test_read_range_is_limited(settings, session_factory) -> None:
         headers={"Authorization": "Bearer read-test-token"},
     )
     assert response.status_code == 400
+
+
+READ_AUTH = {"Authorization": "Bearer read-test-token"}
+
+
+def _run(source: str, job_kind: str, status: str, at: datetime, **fields) -> SyncRun:
+    return SyncRun(
+        source=source,
+        job_kind=job_kind,
+        status=status,
+        started_at=at,
+        finished_at=at + timedelta(minutes=1),
+        **fields,
+    )
+
+
+def test_sync_status_reports_each_source_even_behind_many_newer_runs(
+    settings, session_factory
+) -> None:
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        session.add(_run("slack", "daily_reconcile", "failed", now - timedelta(hours=12),
+                         error="invalid_auth"))
+        session.add_all(
+            _run("jira", "incremental", "success", now - timedelta(minutes=5 * index))
+            for index in range(120)
+        )
+        session.commit()
+    body = TestClient(create_app(settings, session_factory)).get(
+        "/v1/sync-status", headers=READ_AUTH
+    ).json()
+    assert body["sources"]["slack"]["status"] == "failed"
+    assert body["sources"]["slack"]["error"] == "invalid_auth"
+    assert body["sources"]["jira"]["status"] == "success"
+
+
+def test_archive_status_reports_ledger_inventory_and_job_states(
+    settings, session_factory
+) -> None:
+    now = datetime.now(UTC)
+    inventory = {
+        "objects": 3,
+        "bytes": 1300,
+        "raw_objects": 2,
+        "raw_bytes": 1200,
+        "db_verified_batches": 2,
+        "db_verified_bytes": 1200,
+        "missing_verified_objects": 0,
+        "size_mismatches": 0,
+        "untracked_raw_objects": 0,
+    }
+    with session_factory() as session:
+        for index, (status, size) in enumerate(
+            [("verified", 500), ("verified", 700), ("local_verified", 90)]
+        ):
+            session.add(
+                RawArchiveBatch(
+                    object_key=f"raw/v1/2026/09/{index}.jsonl.zst.age",
+                    local_path=f"/tmp/{index}",
+                    status=status,
+                    record_count=10,
+                    ciphertext_size=size,
+                )
+            )
+        session.add(_run("raw_archive", "archive", "success", now - timedelta(hours=5),
+                         counters={"batches": 1, "records": 10, "r2": inventory}))
+        session.add(_run("raw_archive", "archive_verify", "success", now - timedelta(days=9)))
+        session.add(_run("backup", "offsite", "success", now - timedelta(hours=6)))
+        session.add(_run("systemd", "work-history-backup.service", "failed",
+                         now - timedelta(hours=1), error="service_result=exit-code"))
+        session.commit()
+    client = TestClient(create_app(settings, session_factory))
+
+    assert client.get("/v1/archive-status").status_code == 401
+    body = client.get("/v1/archive-status", headers=READ_AUTH).json()
+
+    assert body["db"] == {
+        "verified_batches": 2,
+        "verified_records": 20,
+        "verified_ciphertext_bytes": 1200,
+        "batches_by_status": {"verified": 2, "local_verified": 1},
+    }
+    assert body["r2"]["bytes"] == 1300
+    assert body["r2"]["consistent"] is True
+    assert body["r2"]["checked_at"]
+    assert body["jobs"]["archive"]["state"] == "ok"
+    assert body["jobs"]["archive_verify"]["state"] == "stale"
+    assert body["jobs"]["db_backup_offsite"]["state"] == "failed"
+    assert body["jobs"]["db_backup_offsite"]["error"] == "service_result=exit-code"
+
+
+def test_archive_status_without_any_runs(settings, session_factory) -> None:
+    body = TestClient(create_app(settings, session_factory)).get(
+        "/v1/archive-status", headers=READ_AUTH
+    ).json()
+    assert body["r2"] is None
+    assert {job["state"] for job in body["jobs"].values()} == {"never"}

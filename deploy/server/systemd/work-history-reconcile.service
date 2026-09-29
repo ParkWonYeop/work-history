@@ -1,5 +1,6 @@
 [Unit]
 Description=Reconcile recent Jira and Confluence work history
+OnFailure=work-history-failure@%n.service
 After=network-online.target postgresql.service
 Wants=network-online.target
 

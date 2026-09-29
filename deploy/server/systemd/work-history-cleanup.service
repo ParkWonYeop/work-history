@@ -1,5 +1,6 @@
 [Unit]
 Description=Remove expired raw work-history records
+OnFailure=work-history-failure@%n.service
 After=postgresql.service work-history-archive.service
 
 [Service]

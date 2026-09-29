@@ -1,17 +1,24 @@
 [Unit]
 Description=Back up the work-history PostgreSQL database
-After=postgresql.service
+OnFailure=work-history-failure@%n.service
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 User=workhistory
 Group=workhistory
 EnvironmentFile=/etc/work-history/server.env
+EnvironmentFile=/etc/work-history/archive.env
+Environment=RAW_ARCHIVE_R2_ACCESS_KEY_ID_FILE=%d/r2-access-key-id
+Environment=RAW_ARCHIVE_R2_SECRET_ACCESS_KEY_FILE=%d/r2-secret-access-key
+LoadCredential=r2-access-key-id:/etc/work-history/credentials/r2-access-key-id
+LoadCredential=r2-secret-access-key:/etc/work-history/credentials/r2-secret-access-key
 ExecStart=/opt/work-history/bin/backup.sh
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/backups/work-history
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077

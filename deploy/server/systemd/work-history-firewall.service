@@ -1,5 +1,6 @@
 [Unit]
 Description=Restrict the work-history API to Nginx Proxy Manager
+OnFailure=work-history-failure@%n.service
 After=network-pre.target nftables.service
 Wants=nftables.service
 Before=network.target work-history-api.service

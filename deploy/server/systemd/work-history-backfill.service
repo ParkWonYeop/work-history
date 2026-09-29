@@ -1,5 +1,6 @@
 [Unit]
 Description=Resumable Jira and Confluence historical backfill
+OnFailure=work-history-failure@%n.service
 After=network-online.target postgresql.service
 Wants=network-online.target
 

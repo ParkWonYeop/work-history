@@ -25,3 +25,10 @@ if [ ! -x "$VERIFY_SCRIPT" ]; then
 fi
 "$VERIFY_SCRIPT" "$FINAL"
 find "$BACKUP_DIR" -xdev -type f -name 'workhistory-*.dump' -mtime +13 -delete
+
+# Off-host copy: the restore-tested dump, age-encrypted to the raw archive recipient, in R2.
+if [ -n "${RAW_ARCHIVE_AGE_RECIPIENT:-}" ]; then
+  /opt/work-history/venv/bin/work-history backup-offsite "$FINAL"
+else
+  echo "Offsite backup skipped: RAW_ARCHIVE_AGE_RECIPIENT is not configured" >&2
+fi
