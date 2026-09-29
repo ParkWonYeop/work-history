@@ -32,7 +32,7 @@ mkdir -p "$APP_DIR" "$LOG_DIR" "$HOME/Library/LaunchAgents"
 chmod 700 "$APP_DIR"
 "$PYTHON_BIN" -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip
-"$APP_DIR/venv/bin/pip" install "$SOURCE_DIR"
+"$APP_DIR/venv/bin/pip" install -c "$SOURCE_DIR/constraints.txt" "$SOURCE_DIR"
 
 if [ -n "$HISTORY_START" ]; then
   "$APP_DIR/venv/bin/work-history-agent" --config "$CONFIG_PATH" init \

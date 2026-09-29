@@ -90,7 +90,7 @@ tar -C "$SOURCE_DIR" \
 
 python3 -m venv "$APP_ROOT/venv"
 "$APP_ROOT/venv/bin/pip" install --upgrade pip
-"$APP_ROOT/venv/bin/pip" install "$SOURCE_COPY"
+"$APP_ROOT/venv/bin/pip" install -c "$SOURCE_COPY/constraints.txt" "$SOURCE_COPY"
 
 systemctl enable --now postgresql.service
 if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='workhistory'" | grep -q 1; then
