@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -18,6 +18,9 @@ from work_history.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ponytail: fixed lookback; replies to threads older than this still rely on Socket Mode.
+THREAD_REPLY_LOOKBACK = timedelta(days=30)
 
 
 class SlackApiError(RuntimeError):
@@ -376,11 +379,18 @@ class SlackCollector:
         for channel_id, conversation in sorted(self.conversations.items()):
             messages: dict[str, dict[str, Any]] = {}
             try:
-                for message in self._history(channel_id, start, end):
+                # conversations.history lists thread parents only by their own ts, so scan
+                # back for older parents whose latest_reply lands inside the window.
+                for message in self._history(channel_id, start - THREAD_REPLY_LOOKBACK, end):
                     timestamp = str(message.get("ts") or "")
-                    if timestamp:
+                    if not timestamp:
+                        continue
+                    posted_in_window = in_window(slack_ts_to_datetime(timestamp), start, end)
+                    if posted_in_window:
                         messages[timestamp] = message
-                    if message.get("reply_count") and timestamp:
+                    latest_reply = slack_ts_to_datetime(str(message.get("latest_reply") or ""))
+                    replied_in_window = latest_reply is not None and latest_reply >= start
+                    if message.get("reply_count") and (posted_in_window or replied_in_window):
                         for reply in self._replies(channel_id, timestamp, start, end):
                             reply_timestamp = str(reply.get("ts") or "")
                             if reply_timestamp:

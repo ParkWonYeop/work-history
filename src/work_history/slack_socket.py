@@ -92,10 +92,12 @@ def run_slack_socket(
         while True:
             time.sleep(900)
             try:
-                collector.refresh_context(refresh_users=False)
+                # Refresh users too, so people who joined after startup get real names.
+                collector.refresh_context()
                 logger.info(
-                    "Slack membership refreshed conversations=%s",
+                    "Slack membership refreshed conversations=%s users=%s",
                     len(collector.conversations),
+                    len(collector.users),
                 )
             except Exception:
                 logger.exception("Slack membership refresh failed; retaining previous membership")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -52,16 +52,19 @@ class ConfluenceCollector:
         )
         collected_at = datetime.now(UTC)
         seen: set[str] = set()
+        # CQL date literals have no time or offset and resolve in the user's timezone, so
+        # UTC dates clipped same-day edits. Widen by a day each way; in_window() below keeps
+        # the exact [start, end) boundary.
+        cql_from = (start - timedelta(days=1)).strftime("%Y-%m-%d")
+        cql_to = (end + timedelta(days=1)).strftime("%Y-%m-%d")
         cql_queries = [
             (
                 "(creator=currentUser() OR contributor=currentUser()) "
-                f'AND lastmodified >= "{start.strftime("%Y-%m-%d")}" '
-                f'AND lastmodified <= "{end.strftime("%Y-%m-%d")}"'
+                f'AND lastmodified >= "{cql_from}" AND lastmodified <= "{cql_to}"'
             ),
             (
                 "type=comment AND creator=currentUser() "
-                f'AND lastmodified >= "{start.strftime("%Y-%m-%d")}" '
-                f'AND lastmodified <= "{end.strftime("%Y-%m-%d")}"'
+                f'AND lastmodified >= "{cql_from}" AND lastmodified <= "{cql_to}"'
             ),
         ]
         for cql in cql_queries:

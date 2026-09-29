@@ -48,6 +48,10 @@ class JiraCollector:
         )
         self.site_url = site_url.rstrip("/")
         self.api = ApiClient(client)
+        # issue key -> "updated" of issues a previous contiguous run already collected in full
+        self.known_updates: dict[str, str] = {}
+        self.seen_updates: dict[str, str] = {}
+        self.counters: dict[str, int] = {}
 
     def close(self) -> None:
         self.api.client.close()
@@ -69,13 +73,24 @@ class JiraCollector:
                 )
             ]
         )
-        keys = self._candidate_issue_keys(
+        self.seen_updates = {}
+        self.counters = {"failed_queries": 0, "skipped_unchanged": 0}
+        candidates = self._candidate_issue_keys(
             account_id, start, end, _jql_timezone(myself.get("timeZone"))
         )
         collected_at = datetime.now(UTC)
-        for key in sorted(keys):
+        for key in sorted(candidates):
+            updated = candidates[key]
+            if updated and self.known_updates.get(key) == updated:
+                # Any issue change bumps "updated", so nothing new exists since that run.
+                self.seen_updates[key] = updated
+                self.counters["skipped_unchanged"] += 1
+                continue
             try:
                 self._collect_issue(batch, key, account_id, start, end, collected_at)
+                last_change = parse_datetime(updated)
+                if updated and last_change is not None and last_change < end:
+                    self.seen_updates[key] = updated
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in {403, 404}:
                     logger.warning("Jira issue became unavailable: %s", key)
@@ -96,7 +111,7 @@ class JiraCollector:
         start: datetime,
         end: datetime,
         jql_tz: tzinfo,
-    ) -> set[str]:
+    ) -> dict[str, str | None]:
         # JQL datetime literals carry no offset, so Jira reads them in the account's
         # timezone. Emitting UTC values here shifts the whole window and silently drops
         # the most recent hours of activity.
@@ -120,28 +135,28 @@ class JiraCollector:
                 f'AND worklogDate >= "{start_day}" AND worklogDate <= "{end_day}"'
             ),
         ]
-        keys: set[str] = set()
-        successful_queries = 0
+        keys: dict[str, str | None] = {}
         for jql in queries:
             token: str | None = None
             try:
                 while True:
                     body: dict[str, Any] = {
                         "jql": jql,
-                        "fields": ["key"],
+                        "fields": ["key", "updated"],
                         "maxResults": 100,
                     }
                     if token:
                         body["nextPageToken"] = token
                     payload = self.api.post_json("/rest/api/3/search/jql", json=body)
-                    keys.update(str(issue["key"]) for issue in payload.get("issues", []))
+                    for issue in payload.get("issues", []):
+                        keys[str(issue["key"])] = (issue.get("fields") or {}).get("updated")
                     token = payload.get("nextPageToken")
                     if not token or payload.get("isLast") is True:
                         break
-                successful_queries += 1
             except httpx.HTTPStatusError as exc:
+                self.counters["failed_queries"] += 1
                 logger.warning("Jira candidate JQL failed status=%s", exc.response.status_code)
-        if not successful_queries:
+        if self.counters["failed_queries"] == len(queries):
             raise RuntimeError("all Jira candidate searches failed")
         return keys
 

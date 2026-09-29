@@ -508,3 +508,175 @@ def test_jira_candidate_jql_uses_account_timezone() -> None:
     # the raw UTC rendering must not leak into the query
     assert "2026-08-04 23:00" not in joined, joined
     assert "2026-08-05 02:00" not in joined, joined
+
+
+def test_confluence_cql_dates_are_padded_around_the_window() -> None:
+    """CQL dates have no time and resolve in the user's timezone, so UTC dates alone
+    clipped same-day edits; in_window() still enforces the exact bounds."""
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/wiki/rest/api/user/current":
+            return httpx.Response(200, json={"accountId": "me"})
+        if path == "/wiki/rest/api/content/search":
+            captured.append(request.url.params["cql"])
+            return httpx.Response(200, json={"results": [], "start": 0, "size": 0, "_links": {}})
+        return httpx.Response(404)
+
+    collector = ConfluenceCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        # 08:00-11:00 KST on 2026-08-05, which is still 2026-08-04 in UTC at the start
+        collector.collect(
+            datetime(2026, 8, 4, 23, 0, tzinfo=UTC),
+            datetime(2026, 8, 5, 2, 0, tzinfo=UTC),
+        )
+    finally:
+        collector.close()
+    assert len(captured) == 2
+    for cql in captured:
+        assert 'lastmodified >= "2026-08-03"' in cql, cql
+        assert 'lastmodified <= "2026-08-06"' in cql, cql
+
+
+def test_gitlab_event_dates_are_padded_because_after_and_before_are_exclusive() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v4/user":
+            return httpx.Response(200, json={"id": 7, "username": "me"})
+        if path == "/api/v4/users/7/events":
+            captured.update(request.url.params)
+        return httpx.Response(200, json=[])
+
+    collector = GitLabCollector("https://service.example", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        collector.collect(
+            datetime(2026, 8, 7, 15, 0, tzinfo=UTC),
+            datetime(2026, 8, 14, 15, 0, tzinfo=UTC),
+        )
+    finally:
+        collector.close()
+    # after=2026-08-07 would have skipped 2026-08-07T15:00Z..2026-08-08T00:00Z
+    assert captured["after"] == "2026-08-05"
+    assert captured["before"] == "2026-08-16"
+
+
+def test_slack_reconcile_reads_new_replies_on_older_threads() -> None:
+    old_parent_ts = f"{(START - timedelta(days=3)).timestamp():.6f}"
+    quiet_parent_ts = f"{(START - timedelta(days=4)).timestamp():.6f}"
+    reply_ts = f"{NOW.timestamp():.6f}"
+    history_oldest: list[float] = []
+    replies_for: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        params = dict(httpx.QueryParams(request.content.decode()))
+        if path == "/auth.test":
+            return httpx.Response(200, json={"ok": True, "user_id": "U-ME", "team_id": "T1"})
+        if path == "/users.list":
+            return httpx.Response(200, json={"ok": True, "members": [{"id": "U-ME"}]})
+        if path == "/users.conversations":
+            channels = [{"id": "C1", "name": "team"}]
+            return httpx.Response(200, json={"ok": True, "channels": channels})
+        if path == "/conversations.history":
+            history_oldest.append(float(params["oldest"]))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        {"ts": old_parent_ts, "user": "U-ME", "text": "Old topic",
+                         "reply_count": 3, "latest_reply": reply_ts},
+                        {"ts": quiet_parent_ts, "user": "U-ME", "text": "Quiet topic",
+                         "reply_count": 1, "latest_reply": quiet_parent_ts},
+                    ],
+                },
+            )
+        if path == "/conversations.replies":
+            replies_for.append(params["ts"])
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        {"ts": old_parent_ts, "user": "U-ME", "text": "Old topic"},
+                        {"ts": reply_ts, "thread_ts": old_parent_ts, "user": "U-ME",
+                         "text": "Fresh reply"},
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_found"})
+
+    collector = SlackCollector("https://workspace.example", "xoxp-test")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        batch = collector.collect(START, END)
+    finally:
+        collector.close()
+    assert history_oldest and history_oldest[0] < (START - timedelta(days=4)).timestamp()
+    assert replies_for == [old_parent_ts]
+    assert {artifact.body_text for artifact in batch.artifacts} == {"Fresh reply"}
+    assert [event.action for event in batch.events] == ["thread_replied"]
+
+
+def test_jira_skips_issues_unchanged_since_a_covering_run_and_counts_failed_queries() -> None:
+    requested: list[str] = []
+    search_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal search_calls
+        path = request.url.path
+        requested.append(path)
+        if path == "/rest/api/3/myself":
+            return httpx.Response(200, json={"accountId": "me", "timeZone": "UTC"})
+        if path == "/rest/api/3/search/jql":
+            search_calls += 1
+            if search_calls == 3:
+                return httpx.Response(400, json={"errorMessages": ["bad worklog query"]})
+            return httpx.Response(
+                200,
+                json={
+                    "isLast": True,
+                    "issues": [
+                        {"key": "OLD-1", "fields": {"updated": "2026-08-05T00:30:00.000+0000"}},
+                        {"key": "NEW-2", "fields": {"updated": "2026-08-05T00:40:00.000+0000"}},
+                        {"key": "LATE-3", "fields": {"updated": "2026-08-05T09:00:00.000+0000"}},
+                    ],
+                },
+            )
+        if path.startswith("/rest/api/3/issue/"):
+            if path.endswith("/changelog"):
+                return httpx.Response(200, json={"values": [], "total": 0})
+            if path.endswith("/comment"):
+                return httpx.Response(200, json={"comments": [], "total": 0})
+            if path.endswith("/worklog"):
+                return httpx.Response(200, json={"worklogs": [], "total": 0})
+            return httpx.Response(200, json={"fields": {"summary": "Issue"}})
+        return httpx.Response(404)
+
+    collector = JiraCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    collector.known_updates = {
+        "OLD-1": "2026-08-05T00:30:00.000+0000",
+        "NEW-2": "2026-08-04T00:00:00.000+0000",
+    }
+    try:
+        collector.collect(START, END)
+    finally:
+        collector.close()
+    assert "/rest/api/3/issue/OLD-1" not in requested
+    assert "/rest/api/3/issue/NEW-2" in requested
+    assert collector.counters == {"failed_queries": 1, "skipped_unchanged": 1}
+    # LATE-3 changed after this window ended, so a later run must still read it in full.
+    assert collector.seen_updates == {
+        "OLD-1": "2026-08-05T00:30:00.000+0000",
+        "NEW-2": "2026-08-05T00:40:00.000+0000",
+    }

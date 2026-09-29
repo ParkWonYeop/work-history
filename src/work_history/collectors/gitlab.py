@@ -104,9 +104,11 @@ class GitLabCollector:
         collected_at: datetime,
         project_ids: set[int],
     ) -> None:
+        # after/before are exclusive dates resolved in the server's timezone. Pad two days
+        # each way so no server offset can clip the window; in_window() trims the rest.
         params = {
-            "after": start.strftime("%Y-%m-%d"),
-            "before": (end + timedelta(days=1)).date().isoformat(),
+            "after": (start - timedelta(days=2)).date().isoformat(),
+            "before": (end + timedelta(days=2)).date().isoformat(),
             "sort": "asc",
         }
         for event in self._paginate(f"/api/v4/users/{user_id}/events", params):
