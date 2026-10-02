@@ -1,7 +1,7 @@
 # Work-history daily report automation
 
-Use only the signed `/Users/you/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-report-agent`
-client with the explicit config `/Users/you/Library/Application Support/WorkHistoryReportAgent/config.toml`. Never print,
+Use only the signed `$HOME/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-report-agent`
+client with the explicit config `$HOME/Library/Application Support/WorkHistoryReportAgent/config.toml`. Never print,
 read, or request its Keychain signing key. Store temporary context and Markdown only below `.report-tmp`, set files
 to mode 600, and remove them after a confirmed upload.
 Before cleanup, verify `.report-tmp` is a real directory and not a symbolic link. Remove only the

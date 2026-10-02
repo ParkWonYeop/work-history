@@ -566,7 +566,7 @@ Codex는 `~/.codex/config.toml`에 등록한다.
 
 ```toml
 [mcp_servers.work-history]
-command = "/Users/you/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-mcp"
+command = "/Users/<you>/Library/Application Support/WorkHistoryReportAgent/venv/bin/work-history-mcp"
 ```
 
 | 도구 | 쓰기 | 용도 |

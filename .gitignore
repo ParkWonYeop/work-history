@@ -26,6 +26,7 @@ r2-secret-access-key
 r2-credentials*
 raw-archive/
 config.local.toml
+*.local.md
 work-history.db
 *.db
 *.db-shm
