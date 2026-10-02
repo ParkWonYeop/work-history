@@ -9,10 +9,10 @@
 | 항목 | 실제 값 | 용도 |
 |---|---|---|
 | GitHub 저장소 | https://github.com/ParkWonYeop/work-history (private) | 코드·배포·문서 |
-| Proxmox LXC | Debian 13, hostname work-history-lxc, 192.0.2.4 | API·PostgreSQL·수집·아카이브 |
-| 긴급 SSH | ssh -o BatchMode=yes -o IdentitiesOnly=yes -i /Users/you/.ssh/work-history-lxc -p 2222 root@ssh.example.com | 긴급 운영 전용 |
+| Proxmox LXC | VMID 601, Debian 13, hostname work-history-lxc, 192.0.2.201 (고정 IP) | API·PostgreSQL·수집·아카이브 |
+| Proxmox 호스트 | ssh root@192.0.2.20 → pct exec 601 -- … | 운영·배포 경로. 홈 LAN 또는 Tailscale subnet-router(192.0.2.0/24 서브넷 라우터) 경유. LXC 22번은 Proxmox 방화벽이 관리자 LAN만 허용하고 공유기 포트포워딩은 닫혀 있다 |
 | 공개 API | https://work-history.example.com | HTTPS 읽기 API·GitLab 수신·Report Agent |
-| NPM | 192.0.2.111 | LXC 192.0.2.4:8080의 유일한 LAN 프록시 |
+| NPM | 192.0.2.111 (VMID 108) | LXC 192.0.2.201:8080의 유일한 LAN 프록시 |
 | GitLab | https://gitlab.example.com | Mac VPN 연결 시 수집 |
 | Atlassian | https://example.atlassian.net | Jira·Confluence 수집 |
 | Atlassian 계정 | me@example.com | API 토큰 소유자 |
@@ -85,7 +85,7 @@ GitLab 수신과 Report Agent API는 Bearer 토큰이 아니라 장치별 Ed2551
 
 ## 5. LXC 설치와 배포
 
-권장 LXC: 2 vCPU, RAM 4 GiB, swap 512 MiB, 디스크 40 GiB, 고정 DHCP 주소 192.0.2.4.
+권장 LXC: 2 vCPU, RAM 4 GiB, swap 512 MiB, 디스크 40 GiB, 고정 IP 192.0.2.201/24.
 
     git clone git@github.com:ParkWonYeop/work-history.git
     cd work-history
@@ -106,9 +106,19 @@ Atlassian·Slack·R2는 환경 파일에 토큰을 직접 쓰지 않고 다음 �
     /opt/work-history/source/deploy/server/configure-slack.sh
     /opt/work-history/source/deploy/server/configure-archive.sh
 
+LXC에는 git 체크아웃이 없다. 업데이트는 Mac에서 릴리스 tar를 만들어 Proxmox 호스트로 넣는다.
+
+    REL=work-history-release-$(date +%Y%m%d)-$(git rev-parse --short HEAD)
+    git archive --format=tar.gz --prefix="$REL/" -o "/tmp/$REL.tar.gz" HEAD
+    scp "/tmp/$REL.tar.gz" root@192.0.2.20:/tmp/
+    ssh root@192.0.2.20 "pct push 601 /tmp/$REL.tar.gz /root/$REL.tar.gz && pct exec 601 -- sh -c 'cd /root && tar -xzf $REL.tar.gz && cd $REL && ./deploy/server/install.sh'"
+    ssh root@192.0.2.20 "pct exec 601 -- systemctl restart work-history-slack-socket.service"
+
+install.sh는 API만 재시작한다. 상시 실행되는 Slack Socket 수집기는 직접 재시작하고, 타이머 작업은 다음 실행부터 새 코드를 쓴다.
+
 ## 6. NPM·방화벽
 
-NPM Proxy Host: work-history.example.com → http://192.0.2.4:8080. SSL 인증서와 Force SSL을 활성화하고 deploy/npm/advanced.conf를 적용한다.
+NPM Proxy Host: work-history.example.com → http://192.0.2.201:8080. SSL 인증서와 Force SSL을 활성화하고 deploy/npm/advanced.conf를 적용한다.
 
 LXC nftables 규칙은 아래만 허용해야 한다.
 
@@ -209,7 +219,7 @@ R2 오염 객체를 교체할 때는 새 객체 업로드·원격 검증·DB 원
 ## 13. 인수인계 체크리스트
 
 - [ ] GitHub private repository 접근 권한
-- [ ] Proxmox/LXC 콘솔 또는 긴급 SSH 경로 접근 권한
+- [ ] Proxmox 호스트(192.0.2.20) SSH 또는 웹 콘솔 접근 권한
 - [ ] 비밀을 평문으로 출력하지 않는 root/systemd 권한 또는 비밀번호 관리자 공유 절차
 - [ ] Atlassian, Slack, GitLab, R2의 회사 정책상 권한 확인
 - [ ] Mac Keychain의 GitLab·Report Agent·age 개인키와 비밀번호 관리자 age 복구본 확인
