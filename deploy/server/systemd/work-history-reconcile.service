@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+MemoryMax=1G
+MemorySwapMax=128M
+TimeoutStartSec=2h
 User=workhistory
 Group=workhistory
 EnvironmentFile=/etc/work-history/server.env

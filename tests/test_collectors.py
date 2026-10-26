@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 
 from work_history.collectors.common import ApiClient
 from work_history.collectors.confluence import ConfluenceCollector
@@ -203,6 +204,80 @@ def test_confluence_collector_normalizes_versions_and_comments() -> None:
     assert batch.artifacts[0].body_text == "Current design"
     assert any(version.body_text == "Version two" for version in batch.versions)
     assert any(event.action == "commented" for event in batch.events)
+
+
+@pytest.mark.parametrize("prefix", ["/rest/api", "/wiki/rest/api", "https://service.example/wiki/rest/api"])
+def test_confluence_search_streams_pages_and_preserves_the_next_cursor(prefix) -> None:
+    requests = []
+    next_link = f"{prefix}/content/search?cursor=opaque%2Btoken%3D&limit=2&cql=type%3Dpage"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/wiki/rest/api/content/search"
+        if len(requests) == 1:
+            return httpx.Response(200, json={
+                "results": [{"id": "10"}, {"id": "20"}],
+                "size": 2, "start": 0, "_links": {"next": next_link},
+            })
+        assert len(requests) == 2
+        assert request.url.params["cursor"] == "opaque+token="
+        assert request.url.params["limit"] == "2"
+        assert request.url.params["cql"] == "type=page"
+        return httpx.Response(200, json={"results": [{"id": "20"}, {"id": "30"}]})
+
+    collector = ConfluenceCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        contents = collector._search("type=page")
+        assert next(contents)["id"] == "10"
+        assert len(requests) == 1
+        assert [content["id"] for content in contents] == ["20", "30"]
+        assert len(requests) == 2
+    finally:
+        collector.close()
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_confluence_search_fails_when_pagination_does_not_progress(empty) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert calls <= 2
+        # Reproduce an API ignoring the offset while changing its next URL forever.
+        return httpx.Response(200, json={
+            "results": [] if empty else [{"id": "10"}],
+            "_links": {"next": f"/rest/api/content/search?start={calls * 50}"},
+        })
+
+    collector = ConfluenceCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        with pytest.raises(RuntimeError, match="no new content"):
+            list(collector._search("type=page"))
+    finally:
+        collector.close()
+
+
+def test_confluence_search_rejects_a_next_link_outside_the_configured_site() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "service.example"
+        return httpx.Response(200, json={
+            "results": [{"id": "10"}],
+            "_links": {"next": "https://other.example/wiki/rest/api/content/search"},
+        })
+
+    collector = ConfluenceCollector("https://service.example", "me@example.com", "token")
+    collector.api.client.close()
+    collector.api = _client(handler)
+    try:
+        with pytest.raises(RuntimeError, match="outside the configured site"):
+            list(collector._search("type=page"))
+    finally:
+        collector.close()
 
 
 def test_slack_collector_keeps_only_joined_conversations_and_all_authors() -> None:

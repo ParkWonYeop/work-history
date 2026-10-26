@@ -116,6 +116,8 @@ LXC에는 git 체크아웃이 없다. 업데이트는 Mac에서 릴리스 tar를
 
 install.sh는 API만 재시작한다. 상시 실행되는 Slack Socket 수집기는 직접 재시작하고, 타이머 작업은 다음 실행부터 새 코드를 쓴다.
 
+Jira·Confluence 증분/재검증 unit은 작업당 메모리 1 GiB, swap 128 MiB로 제한한다. 실행 시간은 증분 30분, 재검증 2시간까지 허용한다. 상한 초과 시 실패 기록을 확인하고 원인을 고친 뒤 재실행한다. 수집 실패 시 기존 체크포인트는 유지된다. Confluence 검색은 `_links.next`의 cursor를 그대로 따라야 하며, `start`만 증가시키면 동일 페이지가 반복되어 메모리가 고갈될 수 있다.
+
 ## 6. NPM·방화벽
 
 NPM Proxy Host: `<API_HOST>` → `http://<LXC_IP>:8080`. SSL 인증서와 Force SSL을 활성화하고 deploy/npm/advanced.conf를 적용한다.

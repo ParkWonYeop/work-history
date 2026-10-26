@@ -96,6 +96,29 @@ def test_collector_setup_failure_marks_the_run_failed(settings, session_factory)
         assert "Missing Slack settings" in run.error
 
 
+def test_collection_failure_preserves_the_checkpoint(
+    settings, session_factory, monkeypatch
+) -> None:
+    class BrokenCollector(_FakeJira):
+        def collect(self, start, end):
+            raise RuntimeError("Confluence search pagination returned no new content")
+
+    fake = BrokenCollector()
+    monkeypatch.setattr(cli, "_collector", lambda source, settings: fake)
+    end = datetime(2026, 8, 5, 1, tzinfo=UTC)
+    previous = {"until": (end - timedelta(days=1)).isoformat(), "last_success": "previous"}
+    with session_factory() as session:
+        set_cursor(session, "confluence", "default", previous)
+        session.commit()
+    with pytest.raises(RuntimeError, match="no new content"):
+        _sync_one("confluence", end - timedelta(days=2), end, "incremental", settings,
+                  session_factory)
+    assert fake.closed
+    with session_factory() as session:
+        assert get_cursor(session, "confluence", "default") == previous
+        assert session.scalar(select(SyncRun)).status == "failed"
+
+
 def test_tracked_run_records_success_and_failure(session_factory) -> None:
     with _tracked_run(session_factory, "raw_archive", "archive") as result:
         result["batches"] = 2

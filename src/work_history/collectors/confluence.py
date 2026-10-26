@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -83,28 +85,46 @@ class ConfluenceCollector:
                 )
         return batch
 
-    def _search(self, cql: str) -> list[dict[str, Any]]:
-        start_at = 0
-        results: list[dict[str, Any]] = []
+    def _search(self, cql: str) -> Iterator[dict[str, Any]]:
+        url = f"{self.site_url}/wiki/rest/api/content/search"
+        params: dict[str, Any] | None = {
+            "cql": cql,
+            "limit": 100,
+            "expand": "body.storage,version,space,history,ancestors",
+        }
+        seen_ids: set[str] = set()
+        visited: set[str] = set()
         while True:
-            payload = self.api.get_json(
-                "/wiki/rest/api/content/search",
-                params={
-                    "cql": cql,
-                    "start": start_at,
-                    "limit": 100,
-                    "expand": "body.storage,version,space,history,ancestors",
-                },
-            )
+            if url in visited:
+                raise RuntimeError("Confluence search pagination repeated a next link")
+            visited.add(url)
+            payload = self.api.get_json(url, params=params)
             page = payload.get("results", [])
-            results.extend(page)
-            start_at += len(page)
-            if not page or start_at >= payload.get("size", 0) + payload.get("start", 0):
-                if not payload.get("_links", {}).get("next"):
-                    break
-            if not payload.get("_links", {}).get("next"):
-                break
-        return results
+            next_link = payload.get("_links", {}).get("next")
+            new_ids = {str(content["id"]) for content in page} - seen_ids
+            if not new_ids and (page or next_link):
+                # Fail the sync without advancing its checkpoint if the API stops progressing.
+                raise RuntimeError("Confluence search pagination returned no new content")
+            for content in page:
+                content_id = str(content["id"])
+                if content_id not in seen_ids:
+                    seen_ids.add(content_id)
+                    yield content
+            if not next_link:
+                return
+            # Cloud search requires the opaque cursor in _links.next; incrementing start
+            # alone repeats the first page. Some responses omit the /wiki context path.
+            if next_link.startswith("/rest/api/"):
+                next_link = f"/wiki{next_link}"
+            url = urljoin(url, next_link)
+            target, origin = httpx.URL(url), httpx.URL(self.site_url)
+            if (target.scheme, target.host, target.port) != (
+                origin.scheme, origin.host, origin.port
+            ):
+                raise RuntimeError("Confluence search next link points outside the configured site")
+            # The next link already contains the query and encoded cursor. Passing the
+            # original params again would replace that query in httpx.
+            params = None
 
     def _collect_content(
         self,
